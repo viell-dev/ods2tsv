@@ -1,0 +1,27 @@
+[package]
+name = "ods-to-tsv"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Extract each sheet of an OpenDocument Spreadsheet (.ods) into separate tab-separated (.tsv) files"
+license = "GPL-3.0-only"
+
+[dependencies]
+jiff = "0.2.32"
+quick-xml = "0.41.0"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Small utility crate; error conditions are self-evident from the Error enum.
+missing_errors_doc = "allow"
+
+[profile.release]
+strip = true
+lto = true
