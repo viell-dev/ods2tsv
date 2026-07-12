@@ -1,36 +1,21 @@
-use std::env;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use clap::Parser;
 use ods_to_tsv::{Error, OdsFile, TsvWriter, create_export_dir};
 
-const USAGE: &str = "Usage: ods-to-tsv <filename.ods>";
+/// Extracts each sheet of an OpenDocument Spreadsheet into a separate .tsv
+/// file, in a timestamped directory created in the current working directory.
+#[derive(Parser)]
+#[command(version)]
+struct Args {
+    /// The spreadsheet to extract (.ods or .fods)
+    file: PathBuf,
+}
 
 fn main() -> ExitCode {
-    let mut args = env::args_os().skip(1);
-    let (Some(arg), None) = (args.next(), args.next()) else {
-        eprintln!("{USAGE}");
-        return ExitCode::from(2);
-    };
-
-    match arg.to_str() {
-        Some("-h" | "--help") => {
-            println!("{USAGE}");
-            println!();
-            println!(
-                "Extracts each sheet of an OpenDocument Spreadsheet into a separate .tsv\n\
-                 file, in a timestamped directory created in the current working directory."
-            );
-            return ExitCode::SUCCESS;
-        }
-        Some("-V" | "--version") => {
-            println!("ods-to-tsv {}", env!("CARGO_PKG_VERSION"));
-            return ExitCode::SUCCESS;
-        }
-        _ => {}
-    }
-
-    match run(Path::new(&arg)) {
+    let args = Args::parse();
+    match run(&args) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
@@ -39,12 +24,12 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(path: &Path) -> Result<(), Error> {
+fn run(args: &Args) -> Result<(), Error> {
     // Validate the input before creating anything on disk.
-    let mut ods = OdsFile::open(path)?;
+    let mut ods = OdsFile::open(&args.file)?;
 
     // An empty parent puts the export directory in the CWD.
-    let output_dir = create_export_dir(path, Path::new(""))?;
+    let output_dir = create_export_dir(&args.file, Path::new(""))?;
     println!("Exporting to directory: {}", output_dir.display());
 
     let mut writer = TsvWriter::new(&output_dir);
