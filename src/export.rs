@@ -1,12 +1,18 @@
 //! Expands the compressed sheet model into TSV rows and writes them out.
+//!
+//! Expansion preserves the sheet's cell grid: interior empty rows become
+//! empty records and interior empty cells become empty fields, so data keeps
+//! its row and column positions. Only trailing emptiness — where spreadsheet
+//! files routinely claim thousands of repeated empty rows and columns — is
+//! dropped, without ever materializing it.
 
-use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
+use std::ops::Range;
 use std::path::PathBuf;
 
-use crate::content::{Cell, Sheet};
+use crate::content::{Cell, Row, Sheet};
 
 /// Writes sheets as `<sheet name>.tsv` files into one directory, sanitizing
 /// the names for use as file names and keeping them unique.
@@ -69,91 +75,149 @@ fn sanitize_sheet_name(name: &str) -> String {
     }
 }
 
+/// A merged area whose source value fills the cells it covers.
+struct Merge<'a> {
+    rows: Range<usize>,
+    cols: Range<usize>,
+    text: &'a str,
+}
+
 pub fn write_sheet<W: Write>(sheet: &Sheet, out: &mut W) -> io::Result<()> {
-    // Values of merged areas, keyed by the absolute (row, column) positions
-    // they cover, so covered cells repeat the source value and stay aligned.
-    let mut merged: HashMap<(usize, usize), String> = HashMap::new();
-    let mut current_row = 0usize;
-    let mut is_empty_row = false;
+    let mut merges: Vec<Merge<'_>> = Vec::new();
+    let mut row_index = 0usize;
+    // Empty rows are counted, not written, until a non-empty row follows;
+    // trailing empty rows thus never reach the file.
+    let mut pending_empty_rows = 0usize;
 
-    'rows: for row in &sheet.rows {
-        for _ in 0..row.repeat {
-            let mut cells_out: Vec<Cow<'_, str>> = Vec::new();
-            let mut col = 0usize;
+    for row in &sheet.rows {
+        let template_blank = row.cells.iter().all(|cell| match cell {
+            Cell::Value { text, .. } => text.is_empty(),
+            Cell::Covered { .. } => true,
+        });
 
-            for cell in &row.cells {
-                match cell {
-                    Cell::Value {
-                        repeat,
-                        rows_spanned,
-                        cols_spanned,
-                        text,
-                    } => {
-                        for _ in 0..*repeat {
-                            if *rows_spanned > 1 || *cols_spanned > 1 {
-                                for rs in 0..*rows_spanned {
-                                    for cs in 0..*cols_spanned {
-                                        if rs == 0 && cs == 0 {
-                                            continue;
-                                        }
-                                        merged.insert((current_row + rs, col + cs), text.clone());
-                                    }
-                                }
-                            }
-
-                            cells_out.push(Cow::Borrowed(text.as_str()));
-                            col += 1;
-
-                            // Bail on excessive trailing empty columns.
-                            if text.is_empty() && *repeat > 1024 {
-                                break;
-                            }
-                        }
-                    }
-                    Cell::Covered { repeat } => {
-                        for _ in 0..*repeat {
-                            let value = merged.remove(&(current_row, col)).unwrap_or_default();
-                            cells_out.push(Cow::Owned(value));
-                            col += 1;
-                        }
-                    }
-                }
-            }
-
-            // Merged values spilling past the row's last stored cell.
-            while let Some(value) = merged.remove(&(current_row, col)) {
-                cells_out.push(Cow::Owned(value));
-                col += 1;
-            }
-
-            is_empty_row = cells_out.iter().all(|c| c.is_empty());
-            if is_empty_row && row.repeat > 100 && current_row > 10 && merged.is_empty() {
+        let mut remaining = row.repeat;
+        while remaining > 0 {
+            merges.retain(|m| m.rows.end > row_index);
+            if template_blank && merges.is_empty() {
+                // Nothing can put content into these rows anymore; a single
+                // repeated empty row often claims the rest of the sheet
+                // (up to 2^20 rows), so skip them in bulk.
+                pending_empty_rows += remaining;
+                row_index += remaining;
                 break;
             }
 
-            while cells_out.last().is_some_and(|c| c.is_empty()) {
-                cells_out.pop();
+            let cells = expand_row(row, row_index, &mut merges);
+            if cells.is_empty() {
+                pending_empty_rows += 1;
+            } else {
+                for _ in 0..pending_empty_rows {
+                    out.write_all(b"\r\n")?;
+                }
+                pending_empty_rows = 0;
+                write_tsv_row(out, &cells)?;
             }
-
-            if !is_empty_row {
-                write_tsv_row(out, &cells_out)?;
-            }
-            current_row += 1;
-        }
-
-        // Bail on excessive trailing empty rows.
-        if is_empty_row && row.repeat > 100 && merged.is_empty() {
-            break 'rows;
+            row_index += 1;
+            remaining -= 1;
         }
     }
 
     Ok(())
 }
 
-/// Writes one row like Python's `csv.writer` with `delimiter='\t'`: fields
-/// containing a tab, CR, LF, or quote are wrapped in double quotes with inner
-/// quotes doubled, and rows end in `\r\n`.
-fn write_tsv_row<W: Write>(out: &mut W, cells: &[Cow<'_, str>]) -> io::Result<()> {
+/// Expands one stored row into its field values, filling covered positions
+/// from the merged areas and trimming trailing empty fields.
+fn expand_row<'a>(row: &'a Row, row_index: usize, merges: &mut Vec<Merge<'a>>) -> Vec<&'a str> {
+    // Empty fields are counted, not pushed, until a non-empty field needs
+    // them as padding; trailing empty fields thus never materialize.
+    fn push<'a>(cells: &mut Vec<&'a str>, pending_empty: &mut usize, value: &'a str) {
+        if value.is_empty() {
+            *pending_empty += 1;
+        } else {
+            cells.resize(cells.len() + *pending_empty, "");
+            *pending_empty = 0;
+            cells.push(value);
+        }
+    }
+
+    let mut cells: Vec<&'a str> = Vec::new();
+    let mut pending_empty = 0usize;
+    let mut col = 0usize;
+
+    for cell in &row.cells {
+        match cell {
+            Cell::Value {
+                repeat,
+                rows_spanned,
+                cols_spanned,
+                text,
+            } => {
+                if text.is_empty() {
+                    // Covered positions of an empty merge would be empty
+                    // anyway, so no merge needs recording either.
+                    pending_empty += repeat;
+                    col += repeat;
+                    continue;
+                }
+                for _ in 0..*repeat {
+                    if *rows_spanned > 1 || *cols_spanned > 1 {
+                        merges.push(Merge {
+                            rows: row_index..row_index + rows_spanned,
+                            cols: col..col + cols_spanned,
+                            text,
+                        });
+                    }
+                    push(&mut cells, &mut pending_empty, text);
+                    col += 1;
+                }
+            }
+            Cell::Covered { repeat } => {
+                if merges.is_empty() {
+                    pending_empty += repeat;
+                    col += repeat;
+                    continue;
+                }
+                for _ in 0..*repeat {
+                    push(&mut cells, &mut pending_empty, merge_at(merges, row_index, col));
+                    col += 1;
+                }
+            }
+        }
+    }
+
+    // Merged areas can cover more columns than the row stores cells for;
+    // fill the remainder so the values keep their column positions.
+    let mut spill: Vec<(Range<usize>, &str)> = merges
+        .iter()
+        .filter(|m| m.rows.contains(&row_index) && m.cols.end > col)
+        .map(|m| (m.cols.clone(), m.text))
+        .collect();
+    spill.sort_by_key(|(cols, _)| cols.start);
+    for (cols, text) in spill {
+        if cols.start > col {
+            pending_empty += cols.start - col;
+            col = cols.start;
+        }
+        while col < cols.end {
+            push(&mut cells, &mut pending_empty, text);
+            col += 1;
+        }
+    }
+
+    cells
+}
+
+fn merge_at<'a>(merges: &[Merge<'a>], row: usize, col: usize) -> &'a str {
+    merges
+        .iter()
+        .find(|m| m.rows.contains(&row) && m.cols.contains(&col))
+        .map_or("", |m| m.text)
+}
+
+/// Writes one row in RFC 4180 style with a tab delimiter: fields containing
+/// a tab, CR, LF, or quote are wrapped in double quotes with inner quotes
+/// doubled, and rows end in `\r\n`.
+fn write_tsv_row<W: Write>(out: &mut W, cells: &[&str]) -> io::Result<()> {
     for (i, cell) in cells.iter().enumerate() {
         if i > 0 {
             out.write_all(b"\t")?;

@@ -323,6 +323,71 @@ fn value_attributes_used_without_paragraphs() {
 }
 
 #[test]
+fn empty_rows_and_cells_keep_alignment() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ods = tmp.path().join("align.ods");
+    let content = format!(
+        concat!(
+            "{header}",
+            r#"<table:table table:name="Align">"#,
+            // Leading empty row, then interior empty cells and rows, then a
+            // sheet-tail of repeated emptiness that must all be dropped.
+            "<table:table-row><table:table-cell/></table:table-row>",
+            "<table:table-row>",
+            "<table:table-cell><text:p>a</text:p></table:table-cell>",
+            "<table:table-cell/>",
+            "<table:table-cell><text:p>b</text:p></table:table-cell>",
+            r#"<table:table-cell table:number-columns-repeated="16384"/>"#,
+            "</table:table-row>",
+            r#"<table:table-row table:number-rows-repeated="3"><table:table-cell/></table:table-row>"#,
+            "<table:table-row><table:table-cell><text:p>c</text:p></table:table-cell></table:table-row>",
+            r#"<table:table-row table:number-rows-repeated="1048570">"#,
+            r#"<table:table-cell table:number-columns-repeated="16384"/>"#,
+            "</table:table-row>",
+            "</table:table>",
+            "{footer}",
+        ),
+        header = HEADER,
+        footer = FOOTER,
+    );
+    write_ods(&ods, &[("content.xml", &content)]);
+
+    let out = extract(&ods);
+    assert_eq!(
+        read(&out, "Align.tsv"),
+        "\r\na\t\tb\r\n\r\n\r\n\r\nc\r\n"
+    );
+}
+
+#[test]
+fn merges_spill_into_rows_without_stored_cells() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ods = tmp.path().join("spill.ods");
+    let content = format!(
+        concat!(
+            "{header}",
+            r#"<table:table table:name="Spill">"#,
+            "<table:table-row>",
+            r#"<table:table-cell/>"#,
+            r#"<table:table-cell table:number-rows-spanned="3" office:value-type="string"><text:p>tall</text:p></table:table-cell>"#,
+            "</table:table-row>",
+            // Rows under the merge storing no cells at all: the merge value
+            // must still land in its column.
+            "<table:table-row><table:table-cell/></table:table-row>",
+            "<table:table-row><table:table-cell/></table:table-row>",
+            "</table:table>",
+            "{footer}",
+        ),
+        header = HEADER,
+        footer = FOOTER,
+    );
+    write_ods(&ods, &[("content.xml", &content)]);
+
+    let out = extract(&ods);
+    assert_eq!(read(&out, "Spill.tsv"), "\ttall\r\n\ttall\r\n\ttall\r\n");
+}
+
+#[test]
 fn sheet_name_sanitization() {
     let tmp = tempfile::tempdir().unwrap();
     let ods = tmp.path().join("dirty.ods");
