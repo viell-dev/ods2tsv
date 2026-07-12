@@ -1,5 +1,5 @@
-//! Fixture-based parity tests, ported from the Python `test_ods_to_tsv.py`.
-//! Fixtures are synthetic ODS files: a ZIP with a handwritten `content.xml`.
+//! Fixture-based extraction tests. Fixtures are synthetic ODS files: a ZIP
+//! with a handwritten `content.xml` (or a flat XML document).
 
 use std::fmt::Write as _;
 use std::fs;
@@ -210,6 +210,116 @@ fn repeated_rows_and_columns() {
 
     let out = extract(&ods);
     assert_eq!(read(&out, "Repeats.tsv"), "X\tX\tX\r\nY\r\nY\r\n");
+}
+
+#[test]
+fn whitespace_collapsing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ods = tmp.path().join("ws.ods");
+    let content = format!(
+        concat!(
+            "{header}",
+            r#"<table:table table:name="Ws">"#,
+            "<table:table-row>",
+            "<table:table-cell><text:p>  Leading   and\n\tinner  </text:p></table:table-cell>",
+            "<table:table-cell><text:p>a <text:s/> b</text:p></table:table-cell>",
+            "</table:table-row>",
+            "</table:table>",
+            "{footer}",
+        ),
+        header = HEADER,
+        footer = FOOTER,
+    );
+    write_ods(&ods, &[("content.xml", &content)]);
+
+    let out = extract(&ods);
+    // Character-data whitespace collapses per ODF; the explicit text:s space
+    // survives next to the collapsed one.
+    assert_eq!(read(&out, "Ws.tsv"), "Leading and inner\ta  b\r\n");
+}
+
+#[test]
+fn tab_element_and_cdata() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ods = tmp.path().join("tab.ods");
+    let content = format!(
+        concat!(
+            "{header}",
+            r#"<table:table table:name="Tab">"#,
+            "<table:table-row>",
+            "<table:table-cell><text:p>A<text:tab/>B<![CDATA[ <raw> & data ]]>C</text:p></table:table-cell>",
+            "</table:table-row>",
+            "</table:table>",
+            "{footer}",
+        ),
+        header = HEADER,
+        footer = FOOTER,
+    );
+    write_ods(&ods, &[("content.xml", &content)]);
+
+    let out = extract(&ods);
+    assert_eq!(read(&out, "Tab.tsv"), "\"A\tB <raw> & data C\"\r\n");
+}
+
+#[test]
+fn annotations_and_nested_tables_are_not_cell_text() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ods = tmp.path().join("noise.ods");
+    let content = format!(
+        concat!(
+            "{header}",
+            r#"<table:table table:name="Noise">"#,
+            "<table:table-row>",
+            "<table:table-cell>",
+            "<office:annotation><text:p>a comment</text:p></office:annotation>",
+            "<text:p>visible</text:p>",
+            r#"<table:table table:name="inner">"#,
+            "<table:table-row><table:table-cell><text:p>nested</text:p></table:table-cell></table:table-row>",
+            "</table:table>",
+            "</table:table-cell>",
+            "</table:table-row>",
+            "</table:table>",
+            "{footer}",
+        ),
+        header = HEADER,
+        footer = FOOTER,
+    );
+    write_ods(&ods, &[("content.xml", &content)]);
+
+    let out = extract(&ods);
+    assert_eq!(read(&out, "Noise.tsv"), "visible\r\n");
+    // The nested table must not surface as a sheet of its own.
+    assert!(!out.join("inner.tsv").exists());
+}
+
+#[test]
+fn value_attributes_used_without_paragraphs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ods = tmp.path().join("values.ods");
+    let content = format!(
+        concat!(
+            "{header}",
+            r#"<table:table table:name="Values">"#,
+            "<table:table-row>",
+            r#"<table:table-cell office:value-type="float" office:value="42.5"/>"#,
+            r#"<table:table-cell office:value-type="date" office:date-value="2024-03-01"/>"#,
+            r#"<table:table-cell office:value-type="boolean" office:boolean-value="true"/>"#,
+            r#"<table:table-cell office:value-type="string" office:string-value="from attr"/>"#,
+            r#"<table:table-cell office:value-type="float" office:value="1"><text:p>display text wins</text:p></table:table-cell>"#,
+            "</table:table-row>",
+            "</table:table>",
+            "{footer}",
+        ),
+        header = HEADER,
+        footer = FOOTER,
+    );
+    write_ods(&ods, &[("content.xml", &content)]);
+
+    let out = extract(&ods);
+    assert_eq!(
+        read(&out, "Values.tsv"),
+        "42.5\t2024-03-01\ttrue\tfrom attr\tdisplay text wins\r\n"
+    );
 }
 
 #[test]
