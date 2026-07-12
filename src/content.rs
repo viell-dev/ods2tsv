@@ -6,13 +6,24 @@
 
 use std::io::BufRead;
 
-use quick_xml::encoding::DecodingReader;
+use quick_xml::encoding::{DecodingReader, EncodingError};
 use quick_xml::escape::EscapeError;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::{Namespace, ResolveResult};
 use quick_xml::{NsReader, XmlVersion};
 
 use crate::Error;
+
+/// Reads event payload bytes as UTF-8.
+///
+/// The [`DecodingReader`] transcodes the whole stream to UTF-8 up front, so
+/// this is the correct decoding regardless of the source encoding. The
+/// events' own `decode()`/`xml10_content()` must not be used: the parser
+/// re-detects the source encoding from the XML declaration and would decode
+/// the already-transcoded bytes a second time.
+fn utf8(bytes: &[u8]) -> Result<&str, quick_xml::Error> {
+    std::str::from_utf8(bytes).map_err(|e| quick_xml::Error::Encoding(EncodingError::Utf8(e)))
+}
 
 const NS_TABLE: Namespace<'_> = Namespace(b"urn:oasis:names:tc:opendocument:xmlns:table:1.0");
 const NS_TEXT: Namespace<'_> = Namespace(b"urn:oasis:names:tc:opendocument:xmlns:text:1.0");
@@ -309,14 +320,14 @@ impl<R: BufRead> SheetReader<R> {
                     if para_depth > 0
                         && let Some(c) = cell.as_mut().filter(|c| !c.covered)
                     {
-                        c.push_characters(&t.xml10_content().map_err(quick_xml::Error::Encoding)?);
+                        c.push_characters(utf8(&t)?);
                     }
                 }
                 (_, Event::CData(t)) => {
                     if para_depth > 0
                         && let Some(c) = cell.as_mut().filter(|c| !c.covered)
                     {
-                        c.push_characters(&t.xml10_content().map_err(quick_xml::Error::Encoding)?);
+                        c.push_characters(utf8(&t)?);
                     }
                 }
                 // Entity and character references arrive as separate events.
@@ -324,24 +335,8 @@ impl<R: BufRead> SheetReader<R> {
                     if para_depth > 0
                         && let Some(c) = cell.as_mut().filter(|c| !c.covered)
                     {
-                        if let Some(ch) = r.resolve_char_ref()? {
-                            c.push_characters(ch.encode_utf8(&mut [0u8; 4]));
-                        } else {
-                            let name = r.decode().map_err(quick_xml::Error::Encoding)?;
-                            match name.as_ref() {
-                                "amp" => c.push_characters("&"),
-                                "lt" => c.push_characters("<"),
-                                "gt" => c.push_characters(">"),
-                                "quot" => c.push_characters("\""),
-                                "apos" => c.push_characters("'"),
-                                _ => {
-                                    return Err(quick_xml::Error::Escape(
-                                        EscapeError::UnrecognizedEntity(0..0, name.into_owned()),
-                                    )
-                                    .into());
-                                }
-                            }
-                        }
+                        let resolved = resolve_reference(utf8(&r)?)?;
+                        c.push_characters(resolved.encode_utf8(&mut [0u8; 4]));
                     }
                 }
                 _ => {}
@@ -365,6 +360,58 @@ impl<R: BufRead> Iterator for SheetReader<R> {
             }
         }
     }
+}
+
+/// Checks the root element of a flat XML document without parsing further:
+/// when it declares an `office:mimetype`, it must be a spreadsheet. Lets
+/// [`crate::OdsFile::open`] refuse text documents and the like before any
+/// output is created.
+pub(crate) fn validate_flat_root<R: BufRead>(source: R) -> Result<(), Error> {
+    let mut reader = NsReader::from_reader(DecodingReader::new(source));
+    reader.config_mut().expand_empty_elements = true;
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_resolved_event_into(&mut buf)? {
+            (ResolveResult::Bound(ns), Event::Start(e)) if ns == NS_OFFICE => {
+                if e.local_name().as_ref() == b"document"
+                    && let Some(mime) = attr_string(&mut reader, &e, NS_OFFICE, b"mimetype")?
+                    && !crate::is_spreadsheet_mimetype(&mime)
+                {
+                    return Err(Error::NotSpreadsheet(mime));
+                }
+                return Ok(());
+            }
+            // Any other root element is left to the sheet parser.
+            (_, Event::Start(_) | Event::Eof) => return Ok(()),
+            _ => {}
+        }
+    }
+}
+
+/// Resolves a general entity or character reference (the text between `&`
+/// and `;`). Only the five predefined XML entities are known; anything else
+/// would need a DTD, which OpenDocument files don't use.
+fn resolve_reference(name: &str) -> Result<char, Error> {
+    let char_ref = |digits: &str, radix| {
+        u32::from_str_radix(digits, radix)
+            .ok()
+            .and_then(char::from_u32)
+    };
+    let resolved = match name {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        _ => name.strip_prefix('#').and_then(|num| {
+            num.strip_prefix(['x', 'X'])
+                .map_or_else(|| char_ref(num, 10), |hex| char_ref(hex, 16))
+        }),
+    };
+    resolved.ok_or_else(|| {
+        quick_xml::Error::Escape(EscapeError::UnrecognizedEntity(0..0, name.to_owned())).into()
+    })
 }
 
 /// Whether this element opens a subtree whose paragraphs are not cell text:

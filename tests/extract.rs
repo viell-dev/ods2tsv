@@ -21,11 +21,19 @@ const HEADER: &str = concat!(
 const FOOTER: &str = "</office:spreadsheet></office:body></office:document-content>";
 
 fn write_ods(path: &Path, entries: &[(&str, &str)]) {
+    let raw: Vec<(&str, &[u8])> = entries
+        .iter()
+        .map(|(name, data)| (*name, data.as_bytes()))
+        .collect();
+    write_ods_raw(path, &raw);
+}
+
+fn write_ods_raw(path: &Path, entries: &[(&str, &[u8])]) {
     let mut zip = ZipWriter::new(fs::File::create(path).unwrap());
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     for (name, data) in entries {
         zip.start_file(*name, options).unwrap();
-        zip.write_all(data.as_bytes()).unwrap();
+        zip.write_all(data).unwrap();
     }
     zip.finish().unwrap();
 }
@@ -353,10 +361,7 @@ fn empty_rows_and_cells_keep_alignment() {
     write_ods(&ods, &[("content.xml", &content)]);
 
     let out = extract(&ods);
-    assert_eq!(
-        read(&out, "Align.tsv"),
-        "\r\na\t\tb\r\n\r\n\r\n\r\nc\r\n"
-    );
+    assert_eq!(read(&out, "Align.tsv"), "\r\na\t\tb\r\n\r\n\r\n\r\nc\r\n");
 }
 
 #[test]
@@ -395,6 +400,148 @@ fn sheet_name_sanitization() {
 
     let out = extract(&ods);
     assert_eq!(read(&out, "SheetWithBadChars.tsv"), "data\r\n");
+}
+
+#[test]
+fn duplicate_and_unusable_sheet_names_get_distinct_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ods = tmp.path().join("dupes.ods");
+    fake_ods(
+        &ods,
+        &[
+            ("Dup/", &[&["first"]]),
+            (r"Dup\", &[&["second"]]),
+            ("dup", &[&["third"]]),
+            ("///", &[&["nameless"]]),
+        ],
+    );
+
+    let out = extract(&ods);
+    assert_eq!(read(&out, "Dup.tsv"), "first\r\n");
+    assert_eq!(read(&out, "Dup (2).tsv"), "second\r\n");
+    // Deduplication is case-insensitive for case-insensitive filesystems.
+    assert_eq!(read(&out, "dup (3).tsv"), "third\r\n");
+    assert_eq!(read(&out, "Sheet.tsv"), "nameless\r\n");
+}
+
+#[test]
+fn flat_xml_document_is_extracted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fods = tmp.path().join("flat.fods");
+    let content = concat!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+        r#"<office:document"#,
+        r#" xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0""#,
+        r#" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0""#,
+        r#" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0""#,
+        r#" office:mimetype="application/vnd.oasis.opendocument.spreadsheet">"#,
+        r#"<office:body><office:spreadsheet>"#,
+        r#"<table:table table:name="Flat">"#,
+        "<table:table-row><table:table-cell><text:p>flat data</text:p></table:table-cell></table:table-row>",
+        "</table:table>",
+        "</office:spreadsheet></office:body></office:document>",
+    );
+    fs::write(&fods, content).unwrap();
+
+    let out = extract(&fods);
+    assert_eq!(read(&out, "Flat.tsv"), "flat data\r\n");
+}
+
+#[test]
+fn utf16_content_is_decoded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ods = tmp.path().join("utf16.ods");
+    let content = format!(
+        concat!(
+            "{header}",
+            r#"<table:table table:name="Wide">"#,
+            "<table:table-row><table:table-cell><text:p>åäö ✓</text:p></table:table-cell></table:table-row>",
+            "</table:table>",
+            "{footer}",
+        ),
+        header = HEADER.replace(r#"encoding="UTF-8""#, r#"encoding="UTF-16""#),
+        footer = FOOTER,
+    );
+    let mut bytes = vec![0xFF, 0xFE]; // UTF-16 LE BOM
+    bytes.extend(content.encode_utf16().flat_map(u16::to_le_bytes));
+    write_ods_raw(&ods, &[("content.xml", &bytes)]);
+
+    let out = extract(&ods);
+    assert_eq!(read(&out, "Wide.tsv"), "åäö ✓\r\n");
+}
+
+#[test]
+fn same_second_exports_get_distinct_dirs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ods = tmp.path().join("twice.ods");
+    fake_ods(&ods, &[("Sheet1", &[&["x"]])]);
+
+    let first = extract_ods_to_tsv(&ods, tmp.path()).unwrap();
+    let second = extract_ods_to_tsv(&ods, tmp.path()).unwrap();
+    assert_ne!(first, second);
+    assert!(first.is_dir() && second.is_dir());
+}
+
+#[test]
+fn wrong_package_mimetype_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ods = tmp.path().join("actually-text.ods");
+    write_ods(
+        &ods,
+        &[
+            ("mimetype", "application/vnd.oasis.opendocument.text"),
+            ("content.xml", "<x/>"),
+        ],
+    );
+
+    let err = extract_ods_to_tsv(&ods, tmp.path()).unwrap_err();
+    assert!(
+        matches!(err, Error::NotSpreadsheet(m) if m == "application/vnd.oasis.opendocument.text")
+    );
+}
+
+#[test]
+fn flat_document_with_wrong_mimetype_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fodt = tmp.path().join("letter.fods");
+    let content = concat!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>"#,
+        r#"<office:document"#,
+        r#" xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0""#,
+        r#" office:mimetype="application/vnd.oasis.opendocument.text">"#,
+        "<office:body/></office:document>",
+    );
+    fs::write(&fodt, content).unwrap();
+
+    let err = extract_ods_to_tsv(&fodt, tmp.path()).unwrap_err();
+    assert!(matches!(err, Error::NotSpreadsheet(_)));
+    // Validation failed, so no export directory may exist.
+    assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn package_without_content_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ods = tmp.path().join("hollow.ods");
+    write_ods(
+        &ods,
+        &[("mimetype", "application/vnd.oasis.opendocument.spreadsheet")],
+    );
+
+    let err = extract_ods_to_tsv(&ods, tmp.path()).unwrap_err();
+    assert!(matches!(err, Error::MissingContent));
+}
+
+#[test]
+fn unrecognized_file_is_refused_before_output_exists() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bogus = tmp.path().join("bogus.ods");
+    fs::write(&bogus, [0x7F, b'E', b'L', b'F', 0, 1, 2, 3]).unwrap();
+
+    let err = extract_ods_to_tsv(&bogus, tmp.path()).unwrap_err();
+    assert!(matches!(err, Error::UnrecognizedFormat));
+    // Validation failed, so no export directory may exist.
+    assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
 }
 
 #[test]

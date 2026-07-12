@@ -61,7 +61,10 @@ impl fmt::Display for Error {
                 write!(f, "not an OpenDocument spreadsheet (mimetype {mime:?})")
             }
             Self::MissingContent => {
-                write!(f, "not a valid OpenDocument package: content.xml is missing")
+                write!(
+                    f,
+                    "not a valid OpenDocument package: content.xml is missing"
+                )
             }
             Self::UnrecognizedFormat => write!(
                 f,
@@ -130,7 +133,11 @@ impl OdsFile {
                 validate_package(&mut archive)?;
                 Source::Package(archive)
             }
-            m if looks_like_xml(m) => Source::FlatXml(file),
+            m if looks_like_xml(m) => {
+                content::validate_flat_root(BufReader::new(&mut file))?;
+                file.rewind()?;
+                Source::FlatXml(file)
+            }
             _ => return Err(Error::UnrecognizedFormat),
         };
         Ok(Self { source })
@@ -155,7 +162,11 @@ impl OdsFile {
 /// a ` (2)`, ` (3)`, … suffix keeps runs from writing into each other.
 pub fn create_export_dir(ods_path: &Path, parent: &Path) -> io::Result<PathBuf> {
     let stem = ods_path.file_stem().unwrap_or_default().to_string_lossy();
-    let stem = if stem.is_empty() { "export".into() } else { stem };
+    let stem = if stem.is_empty() {
+        "export".into()
+    } else {
+        stem
+    };
     let timestamp = jiff::Zoned::now().strftime("%Y-%m-%dT%H-%M-%S");
     let base = format!("{stem} - {timestamp}");
 

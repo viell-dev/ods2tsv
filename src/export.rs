@@ -178,7 +178,11 @@ fn expand_row<'a>(row: &'a Row, row_index: usize, merges: &mut Vec<Merge<'a>>) -
                     continue;
                 }
                 for _ in 0..*repeat {
-                    push(&mut cells, &mut pending_empty, merge_at(merges, row_index, col));
+                    push(
+                        &mut cells,
+                        &mut pending_empty,
+                        merge_at(merges, row_index, col),
+                    );
                     col += 1;
                 }
             }
