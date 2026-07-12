@@ -5,7 +5,7 @@
 use std::fs;
 use std::path::Path;
 
-use ods_to_tsv::{Error, extract_ods_to_tsv};
+use ods_to_tsv::{Error, ValueMode, extract_ods_to_tsv};
 
 #[test]
 fn extracts_every_test_file() {
@@ -26,7 +26,7 @@ fn extracts_every_test_file() {
         seen += 1;
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
 
-        let result = extract_ods_to_tsv(&path, tmp.path());
+        let result = extract_ods_to_tsv(&path, tmp.path(), ValueMode::Formatted);
         if name.starts_with("password") {
             assert!(
                 matches!(result, Err(Error::Encrypted)),

@@ -6,7 +6,7 @@ use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use ods_to_tsv::{Error, extract_ods_to_tsv};
+use ods_to_tsv::{Error, ValueMode, extract_ods_to_tsv};
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
@@ -68,7 +68,7 @@ fn fake_ods(path: &Path, sheets: &[(&str, &[&[&str]])]) {
 /// Runs the extractor in a fresh temp dir and returns the export directory.
 fn extract(ods: &Path) -> PathBuf {
     let parent = ods.parent().unwrap();
-    let out_dir = extract_ods_to_tsv(ods, parent).unwrap();
+    let out_dir = extract_ods_to_tsv(ods, parent, ValueMode::Formatted).unwrap();
     assert!(out_dir.is_dir());
     out_dir
 }
@@ -393,6 +393,43 @@ fn merges_spill_into_rows_without_stored_cells() {
 }
 
 #[test]
+fn raw_mode_prefers_stored_values() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ods = tmp.path().join("modes.ods");
+    let content = format!(
+        concat!(
+            "{header}",
+            r#"<table:table table:name="Modes">"#,
+            "<table:table-row>",
+            r#"<table:table-cell office:value-type="date" office:date-value="2024-03-01"><text:p>01/03/2024</text:p></table:table-cell>"#,
+            r#"<table:table-cell office:value-type="currency" office:value="1234.5" office:currency="EUR"><text:p>1.234,50 €</text:p></table:table-cell>"#,
+            r#"<table:table-cell office:value-type="boolean" office:boolean-value="true"><text:p>SANT</text:p></table:table-cell>"#,
+            r#"<table:table-cell office:value-type="string"><text:p>plain text</text:p></table:table-cell>"#,
+            "</table:table-row>",
+            "</table:table>",
+            "{footer}",
+        ),
+        header = HEADER,
+        footer = FOOTER,
+    );
+    write_ods(&ods, &[("content.xml", &content)]);
+
+    let formatted = extract_ods_to_tsv(&ods, tmp.path(), ValueMode::Formatted).unwrap();
+    assert_eq!(
+        read(&formatted, "Modes.tsv"),
+        "01/03/2024\t1.234,50 €\tSANT\tplain text\r\n"
+    );
+
+    // Raw mode takes the stored values; string cells without a stored value
+    // fall back to their display text.
+    let raw = extract_ods_to_tsv(&ods, tmp.path(), ValueMode::Raw).unwrap();
+    assert_eq!(
+        read(&raw, "Modes.tsv"),
+        "2024-03-01\t1234.5\ttrue\tplain text\r\n"
+    );
+}
+
+#[test]
 fn sheet_name_sanitization() {
     let tmp = tempfile::tempdir().unwrap();
     let ods = tmp.path().join("dirty.ods");
@@ -476,8 +513,8 @@ fn same_second_exports_get_distinct_dirs() {
     let ods = tmp.path().join("twice.ods");
     fake_ods(&ods, &[("Sheet1", &[&["x"]])]);
 
-    let first = extract_ods_to_tsv(&ods, tmp.path()).unwrap();
-    let second = extract_ods_to_tsv(&ods, tmp.path()).unwrap();
+    let first = extract_ods_to_tsv(&ods, tmp.path(), ValueMode::Formatted).unwrap();
+    let second = extract_ods_to_tsv(&ods, tmp.path(), ValueMode::Formatted).unwrap();
     assert_ne!(first, second);
     assert!(first.is_dir() && second.is_dir());
 }
@@ -494,7 +531,7 @@ fn wrong_package_mimetype_is_refused() {
         ],
     );
 
-    let err = extract_ods_to_tsv(&ods, tmp.path()).unwrap_err();
+    let err = extract_ods_to_tsv(&ods, tmp.path(), ValueMode::Formatted).unwrap_err();
     assert!(
         matches!(err, Error::NotSpreadsheet(m) if m == "application/vnd.oasis.opendocument.text")
     );
@@ -513,7 +550,7 @@ fn flat_document_with_wrong_mimetype_is_refused() {
     );
     fs::write(&fodt, content).unwrap();
 
-    let err = extract_ods_to_tsv(&fodt, tmp.path()).unwrap_err();
+    let err = extract_ods_to_tsv(&fodt, tmp.path(), ValueMode::Formatted).unwrap_err();
     assert!(matches!(err, Error::NotSpreadsheet(_)));
     // Validation failed, so no export directory may exist.
     assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
@@ -528,7 +565,7 @@ fn package_without_content_is_refused() {
         &[("mimetype", "application/vnd.oasis.opendocument.spreadsheet")],
     );
 
-    let err = extract_ods_to_tsv(&ods, tmp.path()).unwrap_err();
+    let err = extract_ods_to_tsv(&ods, tmp.path(), ValueMode::Formatted).unwrap_err();
     assert!(matches!(err, Error::MissingContent));
 }
 
@@ -538,7 +575,7 @@ fn unrecognized_file_is_refused_before_output_exists() {
     let bogus = tmp.path().join("bogus.ods");
     fs::write(&bogus, [0x7F, b'E', b'L', b'F', 0, 1, 2, 3]).unwrap();
 
-    let err = extract_ods_to_tsv(&bogus, tmp.path()).unwrap_err();
+    let err = extract_ods_to_tsv(&bogus, tmp.path(), ValueMode::Formatted).unwrap_err();
     assert!(matches!(err, Error::UnrecognizedFormat));
     // Validation failed, so no export directory may exist.
     assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
@@ -568,7 +605,7 @@ fn encrypted_file_is_refused() {
         ],
     );
 
-    let err = extract_ods_to_tsv(&ods, tmp.path()).unwrap_err();
+    let err = extract_ods_to_tsv(&ods, tmp.path(), ValueMode::Formatted).unwrap_err();
     assert!(matches!(err, Error::Encrypted));
     assert_eq!(
         err.to_string(),

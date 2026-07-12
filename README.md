@@ -25,6 +25,8 @@ runtime dependencies — no Python, no `lxml`.
   - Applies the ODF whitespace-collapsing rules to character data.
   - Excludes text that isn't cell content: cell comments (annotations), embedded shapes, change-tracking history.
   - Falls back to the `office:*-value` attributes for cells without display text.
+- **Raw or Formatted Values**: `-r`/`--raw` extracts the stored values (ISO dates, unlocalized numbers) instead of the
+  formatted display text.
 - **Timestamped Exports**: Automatically creates a directory named `<filename> - <ISO-datetime>` in the current working
   directory to store the exports, allowing for dated backups. Same-second runs get distinct directories.
 - **Encryption Detection**: Password-protected files are detected up front and refused with a clear message instead of
@@ -50,6 +52,16 @@ ods-to-tsv "Path/To/Your/File.ods"
 ```
 
 A new directory is created in your current location containing the extracted `.tsv` files.
+
+By default cells are extracted as their formatted display text, the way the spreadsheet application shows them
+(localized dates and numbers, currency symbols). Pass `-r`/`--raw` to extract the underlying stored values instead —
+ISO dates, unlocalized numbers — which is usually what you want when the output is consumed by other programs:
+
+```bash
+ods-to-tsv --raw "Path/To/Your/File.ods"
+```
+
+Cells without a stored value (plain text cells) fall back to their display text, and vice versa.
 
 ## Output Format
 

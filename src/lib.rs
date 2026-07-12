@@ -22,7 +22,7 @@ use quick_xml::events::Event;
 use zip::ZipArchive;
 use zip::result::ZipError;
 
-pub use content::{Cell, Row, Sheet, SheetReader};
+pub use content::{Cell, Row, Sheet, SheetReader, ValueMode};
 pub use export::{TsvWriter, write_sheet};
 
 const SPREADSHEET_MIMETYPE: &str = "application/vnd.oasis.opendocument.spreadsheet";
@@ -95,8 +95,10 @@ impl OdsFile {
         Ok(Self { source })
     }
 
-    /// Streams the sheets of the spreadsheet, parsing as it goes.
-    pub fn sheets(&mut self) -> Result<Sheets<'_>, Error> {
+    /// Streams the sheets of the spreadsheet, parsing as it goes. `mode`
+    /// selects between each cell's formatted display text and its raw
+    /// stored value.
+    pub fn sheets(&mut self, mode: ValueMode) -> Result<Sheets<'_>, Error> {
         let raw: Box<dyn Read + '_> = match &mut self.source {
             Source::Package(archive) => Box::new(archive.by_name("content.xml")?),
             Source::FlatXml(file) => {
@@ -104,7 +106,7 @@ impl OdsFile {
                 Box::new(file)
             }
         };
-        Ok(SheetReader::new(BufReader::new(raw)))
+        Ok(SheetReader::new(BufReader::new(raw), mode))
     }
 }
 
@@ -144,11 +146,15 @@ pub fn create_export_dir(ods_path: &Path, parent: &Path) -> io::Result<PathBuf> 
 /// Extracts every sheet of the spreadsheet at `ods_path` into a new export
 /// directory created under `output_parent` (see [`create_export_dir`]), one
 /// `.tsv` file per sheet. Returns the created directory.
-pub fn extract_ods_to_tsv(ods_path: &Path, output_parent: &Path) -> Result<PathBuf, Error> {
+pub fn extract_ods_to_tsv(
+    ods_path: &Path,
+    output_parent: &Path,
+    mode: ValueMode,
+) -> Result<PathBuf, Error> {
     let mut ods = OdsFile::open(ods_path)?;
     let output_dir = create_export_dir(ods_path, output_parent)?;
     let mut writer = TsvWriter::new(&output_dir);
-    for sheet in ods.sheets()? {
+    for sheet in ods.sheets(mode)? {
         writer.write(&sheet?)?;
     }
     Ok(output_dir)

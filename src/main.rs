@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
-use ods_to_tsv::{Error, OdsFile, TsvWriter, create_export_dir};
+use ods_to_tsv::{Error, OdsFile, TsvWriter, ValueMode, create_export_dir};
 
 /// Extracts each sheet of an OpenDocument Spreadsheet into a separate .tsv
 /// file, in a timestamped directory created in the current working directory.
@@ -11,6 +11,11 @@ use ods_to_tsv::{Error, OdsFile, TsvWriter, create_export_dir};
 struct Args {
     /// The spreadsheet to extract (.ods or .fods)
     file: PathBuf,
+
+    /// Extract the raw stored values (ISO dates, unlocalized numbers)
+    /// instead of the formatted display text
+    #[arg(short, long)]
+    raw: bool,
 }
 
 fn main() -> ExitCode {
@@ -32,8 +37,13 @@ fn run(args: &Args) -> Result<(), Error> {
     let output_dir = create_export_dir(&args.file, Path::new(""))?;
     println!("Exporting to directory: {}", output_dir.display());
 
+    let mode = if args.raw {
+        ValueMode::Raw
+    } else {
+        ValueMode::Formatted
+    };
     let mut writer = TsvWriter::new(&output_dir);
-    for sheet in ods.sheets()? {
+    for sheet in ods.sheets(mode)? {
         let sheet = sheet?;
         println!("  Extracting {}...", sheet.name);
         writer.write(&sheet)?;

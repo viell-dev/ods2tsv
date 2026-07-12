@@ -53,14 +53,29 @@ pub enum Cell {
     Covered { repeat: usize },
 }
 
+/// Which of a cell's two representations becomes its extracted text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ValueMode {
+    /// The formatted display text, as the spreadsheet application shows it
+    /// (localized dates and numbers, currency symbols). Falls back to the
+    /// stored value for cells without display text.
+    #[default]
+    Formatted,
+    /// The stored values from the `office:*-value` attributes (ISO dates,
+    /// unlocalized numbers). Falls back to the display text for cells
+    /// without a stored value, such as plain string cells.
+    Raw,
+}
+
 struct PendingCell {
     covered: bool,
     repeat: usize,
     rows_spanned: usize,
     cols_spanned: usize,
-    /// Value from the `office:*-value` attributes, used as display text when
-    /// the cell carries no paragraphs. Spreadsheet applications always write
-    /// the formatted text as paragraphs; minimal producers may not.
+    /// Value from the `office:*-value` attributes: the primary text in
+    /// [`ValueMode::Raw`], the fallback for cells without paragraphs in
+    /// [`ValueMode::Formatted`] (spreadsheet applications always write the
+    /// formatted text as paragraphs; minimal producers may not).
     attr_value: Option<String>,
     paragraphs: Vec<String>,
     /// Whitespace-collapsing state of the paragraph being accumulated: the
@@ -120,16 +135,18 @@ impl PendingCell {
         self.last_was_ws = true;
     }
 
-    fn finish(self) -> Cell {
+    fn finish(self, mode: ValueMode) -> Cell {
         if self.covered {
             Cell::Covered {
                 repeat: self.repeat,
             }
         } else {
-            let text = if self.paragraphs.is_empty() {
-                self.attr_value.unwrap_or_default()
-            } else {
-                self.paragraphs.join("\n")
+            let text = match mode {
+                ValueMode::Formatted if !self.paragraphs.is_empty() => self.paragraphs.join("\n"),
+                ValueMode::Formatted => self.attr_value.unwrap_or_default(),
+                ValueMode::Raw => self
+                    .attr_value
+                    .unwrap_or_else(|| self.paragraphs.join("\n")),
             };
             Cell::Value {
                 repeat: self.repeat,
@@ -151,16 +168,18 @@ impl PendingCell {
 pub struct SheetReader<R: BufRead> {
     reader: NsReader<DecodingReader<R>>,
     buf: Vec<u8>,
+    mode: ValueMode,
     done: bool,
 }
 
 impl<R: BufRead> SheetReader<R> {
-    pub fn new(source: R) -> Self {
+    pub fn new(source: R, mode: ValueMode) -> Self {
         let mut reader = NsReader::from_reader(DecodingReader::new(source));
         reader.config_mut().expand_empty_elements = true;
         Self {
             reader,
             buf: Vec::new(),
+            mode,
             done: false,
         }
     }
@@ -302,7 +321,7 @@ impl<R: BufRead> SheetReader<R> {
                         }
                         b"table-cell" | b"covered-table-cell" => {
                             if let (Some(r), Some(c)) = (row.as_mut(), cell.take()) {
-                                r.cells.push(c.finish());
+                                r.cells.push(c.finish(self.mode));
                             }
                             para_depth = 0;
                         }

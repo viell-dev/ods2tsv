@@ -16,10 +16,11 @@ text leaking into cells) for parity's sake.
 - `src/lib.rs` - public API (`OdsFile`, `extract_ods_to_tsv`, `create_export_dir`), error type, input validation
   (format sniffing, mimetype, encryption manifest).
 - `src/content.rs` - streaming parse of the content XML into a compressed sheet model (repeats/spans kept as counts);
-  ODF text semantics (whitespace collapsing, `text:s`/`text:tab`/`text:line-break`, value-attribute fallback, skipped
-  subtrees).
+  ODF text semantics (whitespace collapsing, `text:s`/`text:tab`/`text:line-break`, skipped subtrees) and the
+  `ValueMode` selection between formatted display text and raw `office:*-value` values.
 - `src/export.rs` - expansion of the model into TSV rows (`write_sheet`) and file naming (`TsvWriter`).
-- `src/main.rs` - CLI entry point (one positional argument, plus `--help`/`--version`); owns all terminal output.
+- `src/main.rs` - CLI entry point (clap derive: one positional argument, `-r`/`--raw`, `--help`/`--version`); owns
+  all terminal output.
 - `tests/extract.rs` - fixture-based tests using synthetic in-memory ODS files.
 - `tests/real_files.rs` - smoke test over `test-files/`; skipped when the directory is absent.
 - `scripts/generate-test-files.sh` - populates the gitignored `test-files/` directory (needs LibreOffice and network).
@@ -53,6 +54,8 @@ Kept deliberately lean (see `docs/rust.md` at the workspace root for the origina
     read as plain UTF-8 (see `content::utf8`); the events' own `decode()`/`xml10_content()` would double-decode
     non-UTF-8 documents because the parser re-detects the declared encoding.
 - `jiff` - local-time timestamp for the export directory name.
+- `clap` (derive) - CLI argument parsing; binary only, the library must not depend on it.
+- `derive_more` (display, error, from) - derives the `Error` enum boilerplate.
 - `tempfile` (dev) - temp dirs for the tests.
 
 ## Testing Expectations
@@ -70,6 +73,6 @@ For changes that could affect output shape, also populate `test-files/` via `scr
 
 - `cargo fmt`, `cargo clippy --all-targets` (pedantic is enabled crate-wide; keep it warning-free), `cargo test`.
 - Prefer `#[expect(lint, reason = "...")]` over `#[allow]`.
-- Preserve CLI simplicity: one positional argument plus `--help`/`--version`, nothing else.
+- Preserve CLI simplicity: one positional argument plus `-r`/`--raw` and `--help`/`--version`, nothing else.
 - Be careful with whitespace semantics. TSV output is sensitive to paragraph joins, `text:s`, `text:tab`,
   `text:line-break`, and the collapsing rules in `PendingCell`.
