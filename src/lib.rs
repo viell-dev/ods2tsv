@@ -12,11 +12,11 @@
 mod content;
 mod export;
 
-use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufReader, ErrorKind, Read, Seek};
 use std::path::{Path, PathBuf};
 
+use derive_more::{Display, Error, From};
 use quick_xml::NsReader;
 use quick_xml::events::Event;
 use zip::ZipArchive;
@@ -32,75 +32,27 @@ pub(crate) fn is_spreadsheet_mimetype(mime: &str) -> bool {
     mime == SPREADSHEET_MIMETYPE || mime == TEMPLATE_MIMETYPE
 }
 
-#[derive(Debug)]
+#[derive(Debug, Display, Error, From)]
 pub enum Error {
+    #[from]
     Io(io::Error),
+    #[from]
     Zip(ZipError),
+    #[display("invalid spreadsheet XML: {_0}")]
+    #[from]
     Xml(quick_xml::Error),
+    #[display("this file is password-protected; save a copy without a password first")]
     Encrypted,
     /// The file is an OpenDocument, but its declared mimetype is not a
     /// spreadsheet.
-    NotSpreadsheet(String),
+    #[display("not an OpenDocument spreadsheet (mimetype {_0:?})")]
+    NotSpreadsheet(#[error(not(source))] String),
     /// The ZIP package has no `content.xml` entry.
+    #[display("not a valid OpenDocument package: content.xml is missing")]
     MissingContent,
     /// The file is neither a ZIP package nor an XML document.
+    #[display("not an OpenDocument spreadsheet (neither a ZIP package nor an XML document)")]
     UnrecognizedFormat,
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(e) => write!(f, "{e}"),
-            Self::Zip(e) => write!(f, "{e}"),
-            Self::Xml(e) => write!(f, "invalid spreadsheet XML: {e}"),
-            Self::Encrypted => write!(
-                f,
-                "this file is password-protected; save a copy without a password first"
-            ),
-            Self::NotSpreadsheet(mime) => {
-                write!(f, "not an OpenDocument spreadsheet (mimetype {mime:?})")
-            }
-            Self::MissingContent => {
-                write!(
-                    f,
-                    "not a valid OpenDocument package: content.xml is missing"
-                )
-            }
-            Self::UnrecognizedFormat => write!(
-                f,
-                "not an OpenDocument spreadsheet (neither a ZIP package nor an XML document)"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for Error {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Io(e) => Some(e),
-            Self::Zip(e) => Some(e),
-            Self::Xml(e) => Some(e),
-            _ => None,
-        }
-    }
-}
-
-impl From<io::Error> for Error {
-    fn from(e: io::Error) -> Self {
-        Self::Io(e)
-    }
-}
-
-impl From<ZipError> for Error {
-    fn from(e: ZipError) -> Self {
-        Self::Zip(e)
-    }
-}
-
-impl From<quick_xml::Error> for Error {
-    fn from(e: quick_xml::Error) -> Self {
-        Self::Xml(e)
-    }
 }
 
 /// An opened and validated OpenDocument spreadsheet: either a regular zipped
