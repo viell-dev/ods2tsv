@@ -2,60 +2,74 @@
 
 ## Project Summary
 
-This repository contains a Rust command-line extractor for OpenDocument Spreadsheet files. Given an `.ods` file, it
-opens the archive, parses `content.xml` with `quick-xml`, and writes one `.tsv` file per sheet into a timestamped
-export directory created in the current working directory.
+This repository contains a Rust command-line extractor for OpenDocument Spreadsheet files. Given an `.ods` (zipped
+package) or `.fods` (flat XML) file, it validates the input, streams the content XML with `quick-xml`, and writes one
+`.tsv` file per sheet into a timestamped export directory created in the current working directory.
 
-It is a behavior-parity port of the original Python implementation (`ods_to_tsv.py`, kept in the sibling `../repo/`
-directory of this workspace). The Python version's semantics are the spec: output must stay byte-for-byte identical,
-including Python `csv.writer` quoting (minimal quoting, `\r\n` row terminators).
+It started as a behavior-parity port of a Python implementation (`ods_to_tsv.py`, kept in the sibling `../repo/`
+directory of this workspace) but has since diverged deliberately: the OpenDocument specification is the spec now, not
+the Python version's output. Do not restore Python quirks (empty-row dropping, repeat bail-out heuristics, annotation
+text leaking into cells) for parity's sake.
 
 ## Repository Layout
 
-- `src/lib.rs` - public API (`extract_ods_to_tsv`), error type, encryption detection, sheet-name sanitization.
-- `src/content.rs` - streaming parse of `content.xml` into a compressed sheet model (repeats/spans kept as counts).
-- `src/export.rs` - expansion of the model into TSV rows; a line-for-line port of the Python loop.
-- `src/main.rs` - CLI entry point (single positional argument).
-- `tests/parity.rs` - fixture-based parity tests using synthetic in-memory ODS files.
+- `src/lib.rs` - public API (`OdsFile`, `extract_ods_to_tsv`, `create_export_dir`), error type, input validation
+  (format sniffing, mimetype, encryption manifest).
+- `src/content.rs` - streaming parse of the content XML into a compressed sheet model (repeats/spans kept as counts);
+  ODF text semantics (whitespace collapsing, `text:s`/`text:tab`/`text:line-break`, value-attribute fallback, skipped
+  subtrees).
+- `src/export.rs` - expansion of the model into TSV rows (`write_sheet`) and file naming (`TsvWriter`).
+- `src/main.rs` - CLI entry point (one positional argument, plus `--help`/`--version`); owns all terminal output.
+- `tests/extract.rs` - fixture-based tests using synthetic in-memory ODS files.
+- `tests/real_files.rs` - smoke test over `test-files/`; skipped when the directory is absent.
+- `scripts/generate-test-files.sh` - populates the gitignored `test-files/` directory (needs LibreOffice and network).
 - `README.md` - user-facing overview, build, usage.
 - `COPYING.md` - GNU GPL v3 license text.
 - `.github/workflows/test.yml` - CI: fmt check, clippy with warnings denied, tests.
 
 ## Key Behavioral Constraints
 
-- The output directory is created relative to the caller's current working directory, not next to the input file.
-- Each sheet becomes its own TSV file named from a sanitized version of the sheet name (`[alnum ._-]`, trimmed).
-- Merged areas are flattened by repeating the source value into the covered cells.
-- Repeat compression is expanded, but with the Python version's bail-outs: an empty cell repeated more than 1024
-  times is emitted once, and an empty row repeated more than 100 times past row 10 stops the sheet.
-- Trailing empty cells are trimmed per row; fully empty rows are not written at all.
-- Password-protected (encrypted) files are detected via `manifest:encryption-data` in `META-INF/manifest.xml` and
-  refused with a friendly error (`Error::Encrypted`). No decryption support.
+- Validation happens before any output: `OdsFile::open` must refuse encrypted, mistyped, and malformed inputs without
+  an export directory ever being created.
+- The output directory is created relative to the caller's current working directory, not next to the input file, and
+  same-second runs get distinct directories.
+- Each sheet becomes its own TSV file named from a sanitized version of the sheet name (`[alnum ._-]`, trimmed of
+  leading/trailing separators, length-bounded, deduplicated case-insensitively, `Sheet` as fallback).
+- The cell grid is preserved: interior empty rows/cells are written, trailing emptiness is dropped without being
+  materialized. Merged areas are tracked as ranges and spill into covered positions, including rows storing no cells.
+- Text that is not cell content (annotations, draw shapes, nested tables, tracked changes) must not leak into output.
+- Character-data whitespace is collapsed per the ODF rules; `text:s`/`text:tab`/`text:line-break` are exempt.
+- The library does not print; all terminal output belongs to `src/main.rs`.
 - Output stability matters. Small changes to parsing logic can change TSV shape, whitespace, or line-break behavior.
 
 ## Dependencies
 
-Kept deliberately lean (see `docs/rust.md` at the workspace root for the dependency analysis):
+Kept deliberately lean (see `docs/rust.md` at the workspace root for the original dependency analysis):
 
 - `zip` with default features off and only `deflate` enabled - do not re-enable default features.
-- `quick-xml` - namespace-aware streaming parser. Note: since 0.38 entity references arrive as separate
-  `Event::GeneralRef` events; text events do not contain them.
+- `quick-xml` with the `encoding` feature - namespace-aware streaming parser. Two sharp edges:
+  - Since 0.38 entity references arrive as separate `Event::GeneralRef` events; text events do not contain them.
+  - The stream is wrapped in `DecodingReader`, which transcodes everything to UTF-8 up front. Event payloads must be
+    read as plain UTF-8 (see `content::utf8`); the events' own `decode()`/`xml10_content()` would double-decode
+    non-UTF-8 documents because the parser re-detects the declared encoding.
 - `jiff` - local-time timestamp for the export directory name.
-- `tempfile` (dev) - temp dirs for the parity tests.
+- `tempfile` (dev) - temp dirs for the tests.
 
 ## Testing Expectations
 
-`cargo test` runs the parity suite. When changing extraction logic, verify at minimum: basic export, merged row/col
-spans, multiline text, repeated spaces, entity references, repeated rows/columns, filename sanitization, and
-encrypted-file refusal.
+`cargo test` runs the fixture suite. When changing extraction logic, verify at minimum: basic export, merged
+row/col spans (including spill into cell-less rows), multiline text, whitespace collapsing, repeated spaces/tabs,
+entity references, repeated rows/columns, grid alignment (interior vs. trailing emptiness), filename
+sanitization/deduplication, flat XML input, UTF-16 input, and the refusals (encrypted, wrong mimetype, missing
+content, unrecognized format).
 
-For changes that could affect output shape, also run a differential test against the Python original: generate a
-fixture ODS, run both `../repo/ods_to_tsv.py` and this binary on it from separate directories, and `diff -r` the
-export directories.
+For changes that could affect output shape, also populate `test-files/` via `scripts/generate-test-files.sh` and run
+`cargo test --test real_files` (or the binary directly) against the real-world files.
 
 ## Editing Guidance
 
 - `cargo fmt`, `cargo clippy --all-targets` (pedantic is enabled crate-wide; keep it warning-free), `cargo test`.
 - Prefer `#[expect(lint, reason = "...")]` over `#[allow]`.
-- Preserve CLI simplicity: one positional argument, nothing else.
-- Be careful with whitespace semantics. TSV output is sensitive to paragraph joins, `text:s`, and `text:line-break`.
+- Preserve CLI simplicity: one positional argument plus `--help`/`--version`, nothing else.
+- Be careful with whitespace semantics. TSV output is sensitive to paragraph joins, `text:s`, `text:tab`,
+  `text:line-break`, and the collapsing rules in `PendingCell`.
