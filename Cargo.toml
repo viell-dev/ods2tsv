@@ -8,7 +8,7 @@ license = "GPL-3.0-only"
 
 [dependencies]
 jiff = "0.2.32"
-quick-xml = "0.41.0"
+quick-xml = { version = "0.41.0", features = ["encoding"] }
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]

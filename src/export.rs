@@ -1,14 +1,73 @@
-//! Expands the compressed sheet model into TSV rows.
-//!
-//! The expansion logic is a line-for-line port of the Python implementation,
-//! including its bail-outs for excessive trailing empty space and its exact
-//! `csv.writer` output format (tab delimiter, minimal quoting, `\r\n`).
+//! Expands the compressed sheet model into TSV rows and writes them out.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
-use std::io::{self, Write};
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
+use std::path::PathBuf;
 
 use crate::content::{Cell, Sheet};
+
+/// Writes sheets as `<sheet name>.tsv` files into one directory, sanitizing
+/// the names for use as file names and keeping them unique.
+pub struct TsvWriter {
+    dir: PathBuf,
+    /// Already-claimed file names, lowercased so that sheets whose sanitized
+    /// names differ only by case still get distinct files on
+    /// case-insensitive filesystems.
+    claimed: HashSet<String>,
+}
+
+impl TsvWriter {
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            dir: dir.into(),
+            claimed: HashSet::new(),
+        }
+    }
+
+    /// Writes `sheet` into the directory and returns the path of the created
+    /// file.
+    pub fn write(&mut self, sheet: &Sheet) -> io::Result<PathBuf> {
+        let file_name = format!("{}.tsv", self.claim_name(&sheet.name));
+        let path = self.dir.join(file_name);
+        let mut out = BufWriter::new(File::create(&path)?);
+        write_sheet(sheet, &mut out)?;
+        out.flush()?;
+        Ok(path)
+    }
+
+    fn claim_name(&mut self, sheet_name: &str) -> String {
+        let base = sanitize_sheet_name(sheet_name);
+        let mut candidate = base.clone();
+        let mut n = 1u32;
+        while !self.claimed.insert(candidate.to_lowercase()) {
+            n += 1;
+            candidate = format!("{base} ({n})");
+        }
+        candidate
+    }
+}
+
+/// Reduces a sheet name to a safe, portable file name: an allowlist of
+/// alphanumerics plus ` . _ -`, no leading/trailing separators (which would
+/// produce hidden or awkward names), bounded length, and a fallback for
+/// names with nothing left after cleaning.
+fn sanitize_sheet_name(name: &str) -> String {
+    const MAX_CHARS: usize = 80;
+
+    let cleaned: String = name
+        .chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-'))
+        .take(MAX_CHARS)
+        .collect();
+    let cleaned = cleaned.trim_matches([' ', '.', '-']);
+    if cleaned.is_empty() {
+        "Sheet".to_owned()
+    } else {
+        cleaned.to_owned()
+    }
+}
 
 pub fn write_sheet<W: Write>(sheet: &Sheet, out: &mut W) -> io::Result<()> {
     // Values of merged areas, keyed by the absolute (row, column) positions
