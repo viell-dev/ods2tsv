@@ -80,7 +80,9 @@ impl OdsFile {
         file.rewind()?;
 
         let source = match &magic[..read] {
-            m if m.starts_with(b"PK") => {
+            // Only the local-file-header signature can begin an ODS package;
+            // the other "PK" record signatures cannot start a valid one.
+            [b'P', b'K', 0x03, 0x04] => {
                 let mut archive = ZipArchive::new(BufReader::new(file))?;
                 validate_package(&mut archive)?;
                 Source::Package(archive)
