@@ -24,8 +24,22 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("error: {e}");
-            ExitCode::FAILURE
+            exit_code(&e)
         }
+    }
+}
+
+/// Maps error categories to exit codes; this is a documented CLI contract
+/// (see the README). Clap owns 2 for usage errors, so custom codes start
+/// at 3.
+fn exit_code(e: &Error) -> ExitCode {
+    match e {
+        Error::NotSpreadsheet(_) | Error::MissingContent | Error::UnrecognizedFormat => {
+            ExitCode::from(3)
+        }
+        Error::Zip(_) | Error::Xml(_) => ExitCode::from(4),
+        Error::Encrypted => ExitCode::from(5),
+        Error::Io(_) => ExitCode::FAILURE,
     }
 }
 

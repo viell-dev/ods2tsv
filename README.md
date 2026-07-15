@@ -63,6 +63,19 @@ ods-to-tsv --raw "Path/To/Your/File.ods"
 
 Cells without a stored value (plain text cells) fall back to their display text, and vice versa.
 
+### Exit Codes
+
+The exit code distinguishes the failure categories, so scripts can branch without parsing stderr:
+
+| Code | Meaning                                                                               |
+| ---- | ------------------------------------------------------------------------------------- |
+| 0    | Success.                                                                              |
+| 1    | Other error (I/O: unreadable input, failure while writing output).                    |
+| 2    | Command-line usage error.                                                             |
+| 3    | Not a usable spreadsheet (not an ODF file, wrong mimetype, or missing `content.xml`). |
+| 4    | Corrupt or malformed input (broken ZIP package, invalid spreadsheet XML).             |
+| 5    | Password-protected input.                                                             |
+
 ## Output Format
 
 Rows are written in RFC 4180 style with a tab delimiter: fields containing tabs, newlines, or double quotes are wrapped

@@ -20,8 +20,10 @@ text leaking into cells) for parity's sake.
   `ValueMode` selection between formatted display text and raw `office:*-value` values.
 - `src/export.rs` - expansion of the model into TSV rows (`write_sheet`) and file naming (`TsvWriter`).
 - `src/main.rs` - CLI entry point (clap derive: one positional argument, `-r`/`--raw`, `--help`/`--version`); owns
-  all terminal output.
+  all terminal output and the exit-code mapping (0 success, 1 other, 2 usage, 3 unusable input, 4 corrupt input,
+  5 encrypted — documented in the README).
 - `tests/extract.rs` - fixture-based tests using synthetic in-memory ODS files.
+- `tests/cli.rs` - exit-code contract tests running the compiled binary.
 - `tests/real_files.rs` - smoke test over `test-files/`; skipped when the directory is absent.
 - `scripts/generate-test-files.sh` - populates the gitignored `test-files/` directory (needs LibreOffice and network).
 - `README.md` - user-facing overview, build, usage.
