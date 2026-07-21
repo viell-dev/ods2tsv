@@ -508,6 +508,119 @@ fn utf16_content_is_decoded() {
 }
 
 #[test]
+fn utf16_be_content_is_decoded() {
+    // The declaration says "UTF-16", which resolves to little endian; it must
+    // not replace the big-endian decoder chosen from the BOM.
+    let tmp = tempfile::tempdir().unwrap();
+    let ods = tmp.path().join("utf16be.ods");
+    let content = format!(
+        concat!(
+            "{header}",
+            r#"<table:table table:name="Wide">"#,
+            "<table:table-row><table:table-cell><text:p>åäö ✓</text:p></table:table-cell></table:table-row>",
+            "</table:table>",
+            "{footer}",
+        ),
+        header = HEADER.replace(r#"encoding="UTF-8""#, r#"encoding="UTF-16""#),
+        footer = FOOTER,
+    );
+    let mut bytes = vec![0xFE, 0xFF]; // UTF-16 BE BOM
+    bytes.extend(content.encode_utf16().flat_map(u16::to_be_bytes));
+    write_ods_raw(&ods, &[("content.xml", &bytes)]);
+
+    let out = extract(&ods);
+    assert_eq!(read(&out, "Wide.tsv"), "åäö ✓\r\n");
+}
+
+/// Encodes a string as ISO-8859-1, one byte per char.
+fn latin1(s: &str) -> Vec<u8> {
+    s.chars()
+        .map(|c| u8::try_from(u32::from(c)).expect("latin-1 range"))
+        .collect()
+}
+
+#[test]
+fn declared_legacy_encoding_is_honored() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ods = tmp.path().join("latin1.ods");
+    let content = format!(
+        concat!(
+            "{header}",
+            r#"<table:table table:name="Legacy">"#,
+            "<table:table-row><table:table-cell><text:p>café über</text:p></table:table-cell></table:table-row>",
+            "</table:table>",
+            "{footer}",
+        ),
+        header = HEADER.replace(r#"encoding="UTF-8""#, r#"encoding="ISO-8859-1""#),
+        footer = FOOTER,
+    );
+    write_ods_raw(
+        &ods,
+        &[
+            (
+                "mimetype",
+                b"application/vnd.oasis.opendocument.spreadsheet",
+            ),
+            ("content.xml", &latin1(&content)),
+        ],
+    );
+
+    let out = extract(&ods);
+    assert_eq!(read(&out, "Legacy.tsv"), "café über\r\n");
+}
+
+#[test]
+fn flat_xml_with_legacy_encoding_is_extracted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fods = tmp.path().join("latin1.fods");
+    let content = concat!(
+        r#"<?xml version="1.0" encoding="ISO-8859-1"?>"#,
+        r#"<office:document"#,
+        r#" xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0""#,
+        r#" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0""#,
+        r#" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0""#,
+        r#" office:mimetype="application/vnd.oasis.opendocument.spreadsheet">"#,
+        r#"<office:body><office:spreadsheet>"#,
+        r#"<table:table table:name="Flat">"#,
+        "<table:table-row><table:table-cell><text:p>café über</text:p></table:table-cell></table:table-row>",
+        "</table:table>",
+        "</office:spreadsheet></office:body></office:document>",
+    );
+    fs::write(&fods, latin1(content)).unwrap();
+
+    let out = extract(&fods);
+    assert_eq!(read(&out, "Flat.tsv"), "café über\r\n");
+}
+
+#[test]
+fn declaration_past_detection_window_is_refused() {
+    // A legacy encoding can only be applied while the decoder's 64-byte
+    // detection prefix is buffered; a declaration padded past it must be
+    // refused (not panic, not mis-decode).
+    let tmp = tempfile::tempdir().unwrap();
+    let fods = tmp.path().join("padded.fods");
+    let content = format!(
+        concat!(
+            r#"<?xml version="1.0"{pad}encoding="ISO-8859-1"?>"#,
+            r#"<office:document"#,
+            r#" xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0""#,
+            r#" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0""#,
+            r#" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">"#,
+            r#"<office:body><office:spreadsheet>"#,
+            r#"<table:table table:name="Padded"><table:table-row>"#,
+            "<table:table-cell><text:p>café</text:p></table:table-cell>",
+            "</table:table-row></table:table>",
+            "</office:spreadsheet></office:body></office:document>",
+        ),
+        pad = " ".repeat(50),
+    );
+    fs::write(&fods, latin1(&content)).unwrap();
+
+    let err = extract_ods_to_tsv(&fods, tmp.path(), ValueMode::Formatted).unwrap_err();
+    assert!(matches!(err, Error::Xml(_)));
+}
+
+#[test]
 fn same_second_exports_get_distinct_dirs() {
     let tmp = tempfile::tempdir().unwrap();
     let ods = tmp.path().join("twice.ods");

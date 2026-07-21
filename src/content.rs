@@ -8,7 +8,7 @@ use std::io::BufRead;
 
 use quick_xml::encoding::{DecodingReader, EncodingError};
 use quick_xml::escape::EscapeError;
-use quick_xml::events::{BytesStart, Event};
+use quick_xml::events::{BytesDecl, BytesStart, Event};
 use quick_xml::name::{Namespace, ResolveResult};
 use quick_xml::{NsReader, XmlVersion};
 
@@ -23,6 +23,49 @@ use crate::Error;
 /// the already-transcoded bytes a second time.
 fn utf8(bytes: &[u8]) -> Result<&str, quick_xml::Error> {
     std::str::from_utf8(bytes).map_err(|e| quick_xml::Error::Encoding(EncodingError::Utf8(e)))
+}
+
+/// Applies the `encoding` pseudo-attribute of the XML declaration to the
+/// stream decoder.
+///
+/// The [`DecodingReader`] detects UTF-8 and UTF-16 on its own but assumes
+/// UTF-8 for every other, necessarily ASCII-compatible, stream; a declared
+/// legacy encoding such as ISO-8859-1 has to be applied manually. Switching
+/// is only possible while the reader's detection prefix is still buffered,
+/// so a declaration ending past it is refused instead of mis-decoded.
+fn apply_declared_encoding<R: BufRead>(
+    reader: &mut NsReader<DecodingReader<R>>,
+    decl: &BytesDecl<'_>,
+) -> Result<(), Error> {
+    // The `DecodingReader` buffers 64 source bytes (its private `PREFIX_CAP`)
+    // for detection; up to 3 of them can be a UTF-8 BOM, which the buffer
+    // position does not count.
+    const DETECTION_WINDOW: u64 = 61;
+
+    // An unknown encoding label stays on UTF-8: genuinely mismatched bytes
+    // still fail decoding later instead of turning into garbage.
+    let Some(declared) = decl.encoder() else {
+        return Ok(());
+    };
+    let current = reader.get_ref().encoding();
+    if declared == current
+        // A UTF-16 stream was recognized from its BOM or byte pattern and is
+        // already being transcoded; the declaration must not replace the
+        // correctly-oriented decoder ("UTF-16" resolves to little endian).
+        // A UTF-16 declaration on an ASCII-compatible stream is equally
+        // impossible and ignored.
+        || !current.is_ascii_compatible()
+        || !declared.is_ascii_compatible()
+    {
+        return Ok(());
+    }
+    if reader.buffer_position() > DETECTION_WINDOW {
+        // `set_encoding` panics once the prefix is drained, and everything
+        // after the declaration was already decoded as UTF-8.
+        return Err(quick_xml::Error::Encoding(EncodingError::Other(declared)).into());
+    }
+    reader.get_mut().set_encoding(declared);
+    Ok(())
 }
 
 const NS_TABLE: Namespace<'_> = Namespace(b"urn:oasis:names:tc:opendocument:xmlns:table:1.0");
@@ -358,6 +401,7 @@ impl<R: BufRead> SheetReader<R> {
                         c.push_characters(resolved.encode_utf8(&mut [0u8; 4]));
                     }
                 }
+                (_, Event::Decl(e)) => apply_declared_encoding(&mut self.reader, &e)?,
                 _ => {}
             }
         }
@@ -403,6 +447,9 @@ pub(crate) fn validate_flat_root<R: BufRead>(source: R) -> Result<(), Error> {
             }
             // Any other root element is left to the sheet parser.
             (_, Event::Start(_) | Event::Eof) => return Ok(()),
+            // The declared encoding must be honored here too: reaching the
+            // root element can require decoding past pure-ASCII content.
+            (_, Event::Decl(e)) => apply_declared_encoding(&mut reader, &e)?,
             _ => {}
         }
     }

@@ -50,11 +50,15 @@ text leaking into cells) for parity's sake.
 Kept deliberately lean (see `docs/rust.md` at the workspace root for the original dependency analysis):
 
 - `zip` with default features off and only `deflate` enabled - do not re-enable default features.
-- `quick-xml` with the `encoding` feature - namespace-aware streaming parser. Two sharp edges:
+- `quick-xml` with the `encoding` feature - namespace-aware streaming parser. Three sharp edges:
   - Since 0.38 entity references arrive as separate `Event::GeneralRef` events; text events do not contain them.
   - The stream is wrapped in `DecodingReader`, which transcodes everything to UTF-8 up front. Event payloads must be
     read as plain UTF-8 (see `content::utf8`); the events' own `decode()`/`xml10_content()` would double-decode
     non-UTF-8 documents because the parser re-detects the declared encoding.
+  - `DecodingReader` auto-detects only BOMs and UTF-16 byte patterns; a declared legacy encoding (ISO-8859-1 and the
+    like) is applied manually on `Event::Decl` via `content::apply_declared_encoding`. The switch must happen inside
+    the reader's 64-byte detection prefix and must never touch a detected UTF-16 stream (both loops that read a
+    declaration need this handling).
 - `jiff` - local-time timestamp for the export directory name.
 - `clap` (derive) - CLI argument parsing; binary only, the library must not depend on it.
 - `derive_more` (display, error, from) - derives the `Error` enum boilerplate.
@@ -65,8 +69,8 @@ Kept deliberately lean (see `docs/rust.md` at the workspace root for the origina
 `cargo test` runs the fixture suite. When changing extraction logic, verify at minimum: basic export, merged
 row/col spans (including spill into cell-less rows), multiline text, whitespace collapsing, repeated spaces/tabs,
 entity references, repeated rows/columns, grid alignment (interior vs. trailing emptiness), filename
-sanitization/deduplication, flat XML input, UTF-16 input, and the refusals (encrypted, wrong mimetype, missing
-content, unrecognized format).
+sanitization/deduplication, flat XML input, UTF-16 input, declared legacy encodings, and the refusals (encrypted,
+wrong mimetype, missing content, unrecognized format).
 
 For changes that could affect output shape, also populate `test-files/` via `scripts/generate-test-files.sh` and run
 `cargo test --test real_files` (or the binary directly) against the real-world files.
