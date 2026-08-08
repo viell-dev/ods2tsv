@@ -1,0 +1,11 @@
+{
+  "cSpell.ignoreWords": [
+    "clippy",
+    "opendocument",
+    "strftime"
+  ],
+  "explorer.fileNesting.enabled": true,
+  "explorer.fileNesting.patterns": {
+    "Cargo.toml": "Cargo.lock"
+  }
+}
