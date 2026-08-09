@@ -1,3 +1,4 @@
 [toolchain]
+# Pin compiler and formatting behavior so local development and CI agree.
 channel = "1.94.0"
 components = ["clippy", "rustfmt"]

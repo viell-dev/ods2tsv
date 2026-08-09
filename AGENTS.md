@@ -6,10 +6,10 @@ This repository contains a Rust command-line extractor for OpenDocument Spreadsh
 package) or `.fods` (flat XML) file, it validates the input, streams the content XML with `quick-xml`, and writes one
 `.tsv` file per sheet into a timestamped export directory created in the current working directory.
 
-It started as a behavior-parity port of a Python implementation (`ods_to_tsv.py`, kept in the sibling `../repo/`
-directory of this workspace) but has since diverged deliberately: the OpenDocument specification is the spec now, not
-the Python version's output. Do not restore Python quirks (empty-row dropping, repeat bail-out heuristics, annotation
-text leaking into cells) for parity's sake.
+It started as a behavior-parity port of a Python implementation (`ods_to_tsv.py`, kept in the sibling
+`../python-old/` repository in this workspace) but has since diverged deliberately: the OpenDocument specification is
+the spec now, not the Python version's output. Do not restore Python quirks (empty-row dropping, repeat bail-out
+heuristics, annotation text leaking into cells) for parity's sake.
 
 ## Repository Layout
 
@@ -47,7 +47,7 @@ text leaking into cells) for parity's sake.
 
 ## Dependencies
 
-Kept deliberately lean (see `docs/rust.md` at the workspace root for the original dependency analysis):
+Kept deliberately lean (see `../docs/archive/rust.md` for the historical dependency analysis):
 
 - `zip` with default features off and only `deflate` enabled - do not re-enable default features.
 - `quick-xml` with the `encoding` feature - namespace-aware streaming parser. Three sharp edges:

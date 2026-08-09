@@ -1,5 +1,7 @@
 name: Rust Test
 
+# Branch filters currently target the primary manual implementation. Pull requests from llm1 to
+# main are still checked because the base branch is main.
 on:
   push:
     branches: [ "main" ]
@@ -8,9 +10,11 @@ on:
 
 jobs:
   test:
+    # One job keeps the formatting, lint, and behavior checks on the same pinned Rust environment.
     runs-on: ubuntu-latest
 
     steps:
+    # The repository's rust-toolchain.toml makes checkout-local Rust commands select Rust 1.94.0.
     - uses: actions/checkout@v4
 
     - name: Install pinned toolchain

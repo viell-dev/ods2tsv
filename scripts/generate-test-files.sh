@@ -14,9 +14,12 @@
 # Requires: python3, libreoffice (soffice), curl.
 set -euo pipefail
 
+# Resolve every relative path from the repository root, regardless of the caller's CWD.
 cd "$(dirname "$0")/.."
 mkdir -p test-files
 
+# This shared body deliberately combines the parser's hardest features in one workbook. The unit-
+# style integration tests isolate behavior; these rich files test feature interaction.
 body=$(cat <<'EOF'
   <office:body>
     <office:spreadsheet>
@@ -110,6 +113,7 @@ rm test-files/content.xml.tmp
 echo "wrote test-files/rich.ods"
 
 # A throwaway profile keeps soffice from fighting a running desktop instance.
+# Both temporary directories are explicit variables so the EXIT trap has narrow, known targets.
 profile="$(mktemp -d)"
 roundtrip="$(mktemp -d)"
 trap 'rm -rf "$profile" "$roundtrip"' EXIT

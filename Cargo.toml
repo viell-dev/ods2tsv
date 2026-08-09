@@ -1,22 +1,32 @@
 [package]
 name = "ods-to-tsv"
 version = "0.1.0"
+# Edition 2024 enables the language defaults this source was written against; rust-version is the
+# minimum compiler Cargo will accept and matches the pinned development toolchain below.
 edition = "2024"
 rust-version = "1.94"
 description = "Extract each sheet of an OpenDocument Spreadsheet (.ods) into separate tab-separated (.tsv) files"
 license = "GPL-3.0-only"
 
 [dependencies]
+# clap is binary-only in practice: src/main.rs uses its derive macro for the two CLI arguments.
 clap = { version = "4.6.1", features = ["derive"] }
+# derive_more supplies Display, Error, and From implementations for the library error enum.
 derive_more = { version = "2.1.1", features = ["display", "error", "from"] }
+# jiff formats the local timestamp used in each export-directory name.
 jiff = "0.2.32"
+# The encoding feature adds DecodingReader for UTF-16 and declared legacy XML encodings.
 quick-xml = { version = "0.41.0", features = ["encoding"] }
+# ODS needs only stored/deflated ZIP members. Disabling defaults avoids unrelated compression
+# codecs.
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
+# Tests isolate input and output artifacts in automatically removed directories.
 tempfile = "3.27.0"
 
 [lints.rust]
+# The implementation has no need for raw-pointer or unsafe-block escape hatches.
 unsafe_code = "forbid"
 
 [lints.clippy]
@@ -25,5 +35,6 @@ pedantic = { level = "warn", priority = -1 }
 missing_errors_doc = "allow"
 
 [profile.release]
+# Prefer a small distributable over fast incremental release builds.
 strip = true
 lto = true

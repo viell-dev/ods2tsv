@@ -3,6 +3,20 @@
 //! The model mirrors the document structure: row/column repeats and spans are
 //! kept as counts rather than expanded, exactly as the file states them.
 //! Expansion happens in [`crate::export`].
+//!
+//! # Why this is an event parser
+//!
+//! Real spreadsheet XML can be much larger than the resulting useful data, especially when an
+//! application serializes a million repeated empty rows. [`SheetReader`] therefore consumes
+//! `quick-xml` events and returns as soon as one outer `table:table` closes. It never builds an XML
+//! tree or retains earlier sheets.
+//!
+//! # The three layers of state
+//!
+//! The main loop tracks a currently open sheet, row, and cell. A [`PendingCell`] additionally
+//! accumulates paragraph text until its closing element determines the final [`Cell`]. `para_depth`
+//! and `skip_depth` are small state-machine counters used to distinguish visible cell text from XML
+//! that happens to contain paragraphs but represents comments, drawings, nested tables, or history.
 
 use std::io::BufRead;
 
@@ -68,27 +82,43 @@ fn apply_declared_encoding<R: BufRead>(
     Ok(())
 }
 
+// XML prefixes such as `table:` are only aliases chosen by the producer. Comparing the namespace
+// URI plus local name makes an equivalent document work even if it spells the prefix differently.
 const NS_TABLE: Namespace<'_> = Namespace(b"urn:oasis:names:tc:opendocument:xmlns:table:1.0");
 const NS_TEXT: Namespace<'_> = Namespace(b"urn:oasis:names:tc:opendocument:xmlns:text:1.0");
 const NS_OFFICE: Namespace<'_> = Namespace(b"urn:oasis:names:tc:opendocument:xmlns:office:1.0");
 const NS_DRAW: Namespace<'_> = Namespace(b"urn:oasis:names:tc:opendocument:xmlns:drawing:1.0");
 const NS_DR3D: Namespace<'_> = Namespace(b"urn:oasis:names:tc:opendocument:xmlns:dr3d:1.0");
 
+/// One ODF table (what spreadsheet applications present as a sheet).
+///
+/// `rows` is still compressed: one [`Row`] may represent many consecutive physical rows.
 pub struct Sheet {
+    /// The exact `table:name` value. File-name cleanup happens only in the export layer.
     pub name: String,
+    /// Row templates in source order.
     pub rows: Vec<Row>,
 }
 
+/// One stored row template and the number of physical rows it represents.
 pub struct Row {
+    /// `table:number-rows-repeated`, normalized to at least one.
     pub repeat: usize,
+    /// Cell templates in source order; cells may independently repeat across columns.
     pub cells: Vec<Cell>,
 }
 
+/// A compact cell template from the ODF grid.
 pub enum Cell {
+    /// A normal cell. The value and its span apply separately to every repeated occurrence.
     Value {
+        /// `table:number-columns-repeated`, normalized to at least one.
         repeat: usize,
+        /// Height of a merged area beginning at this cell.
         rows_spanned: usize,
+        /// Width of a merged area beginning at this cell.
         cols_spanned: usize,
+        /// Already-selected formatted or raw representation; the exporter is value-mode agnostic.
         text: String,
     },
     /// A cell hidden under a merged area. Any content it carries is ignored;
@@ -110,16 +140,25 @@ pub enum ValueMode {
     Raw,
 }
 
+/// Parser-only state for a cell whose closing tag has not arrived yet.
+///
+/// Separating this from [`Cell`] keeps transient paragraph and whitespace state out of the public
+/// model. [`PendingCell::finish`] is the single point where [`ValueMode`] chooses a representation.
 struct PendingCell {
+    /// Whether the source element is `table:covered-table-cell` rather than a normal value cell.
     covered: bool,
+    /// Number of adjacent columns represented by this element.
     repeat: usize,
+    /// Merge height declared on the source cell.
     rows_spanned: usize,
+    /// Merge width declared on the source cell.
     cols_spanned: usize,
     /// Value from the `office:*-value` attributes: the primary text in
     /// [`ValueMode::Raw`], the fallback for cells without paragraphs in
     /// [`ValueMode::Formatted`] (spreadsheet applications always write the
     /// formatted text as paragraphs; minimal producers may not).
     attr_value: Option<String>,
+    /// Display paragraphs accumulated in document order. They are joined by newlines at finish.
     paragraphs: Vec<String>,
     /// Whitespace-collapsing state of the paragraph being accumulated: the
     /// last content ended in whitespace (so further character-data
@@ -131,6 +170,7 @@ struct PendingCell {
 }
 
 impl PendingCell {
+    /// Opens a new top-level paragraph and resets whitespace collapse state at its boundary.
     fn start_paragraph(&mut self) {
         self.paragraphs.push(String::new());
         // Whitespace at the start of a paragraph is ignored.
@@ -171,6 +211,8 @@ impl PendingCell {
             return;
         };
         if self.pending_space {
+            // Character whitespace just before an explicit whitespace element still contributes its
+            // one collapsed space. The explicit element then contributes independently.
             para.push(' ');
             self.pending_space = false;
         }
@@ -178,13 +220,18 @@ impl PendingCell {
         self.last_was_ws = true;
     }
 
+    /// Converts accumulated parser state to the smaller model consumed by the exporter.
     fn finish(self, mode: ValueMode) -> Cell {
         if self.covered {
+            // Covered-cell payload is intentionally discarded: its visible value comes from the
+            // normal cell at the top-left of the active merged range.
             Cell::Covered {
                 repeat: self.repeat,
             }
         } else {
             let text = match mode {
+                // The presence of a paragraph is significant even if the paragraph is empty: that
+                // is the producer's formatted representation and should beat an attribute fallback.
                 ValueMode::Formatted if !self.paragraphs.is_empty() => self.paragraphs.join("\n"),
                 ValueMode::Formatted => self.attr_value.unwrap_or_default(),
                 ValueMode::Raw => self
@@ -209,15 +256,21 @@ impl PendingCell {
 /// root element carries an `office:mimetype` (flat documents do), it must be
 /// the spreadsheet mimetype.
 pub struct SheetReader<R: BufRead> {
+    /// Namespace-aware XML reader wrapped in a byte-to-UTF-8 transcoder.
     reader: NsReader<DecodingReader<R>>,
+    /// Reused event buffer. Clearing preserves its allocation between XML events.
     buf: Vec<u8>,
+    /// Value-selection policy copied into each finished cell.
     mode: ValueMode,
+    /// Prevents [`Iterator::next`] from touching the reader after EOF or the first parse error.
     done: bool,
 }
 
 impl<R: BufRead> SheetReader<R> {
     pub fn new(source: R, mode: ValueMode) -> Self {
         let mut reader = NsReader::from_reader(DecodingReader::new(source));
+        // Normalizing `<cell/>` to Start + End lets one set of closing-element arms finish empty
+        // rows and cells. Without this, every relevant element would also need an Event::Empty arm.
         reader.config_mut().expand_empty_elements = true;
         Self {
             reader,
@@ -232,6 +285,8 @@ impl<R: BufRead> SheetReader<R> {
         reason = "single event-loop state machine; splitting the match arms apart would obscure the flow"
     )]
     fn next_sheet(&mut self) -> Result<Option<Sheet>, Error> {
+        // At most one value exists at each layer. `Option::take` at an end tag transfers ownership
+        // upward: PendingCell -> Row -> Sheet -> iterator caller.
         let mut sheet: Option<Sheet> = None;
         let mut row: Option<Row> = None;
         let mut cell: Option<PendingCell> = None;
@@ -251,6 +306,8 @@ impl<R: BufRead> SheetReader<R> {
                     // still returned rather than dropped.
                     return Ok(sheet);
                 }
+                // Once a forbidden subtree starts, namespace and element semantics inside it no
+                // longer matter. Nesting depth is enough to find the matching outer end tag.
                 (_, Event::Start(_)) if skip_depth > 0 => skip_depth += 1,
                 (_, Event::End(_)) if skip_depth > 0 => skip_depth -= 1,
                 (_, _) if skip_depth > 0 => {}
@@ -259,9 +316,13 @@ impl<R: BufRead> SheetReader<R> {
                 {
                     skip_depth = 1;
                 }
+                // Table-namespace start tags open the structural objects. The `is_some`/`is_none`
+                // guards keep malformed nesting from replacing state that is already in progress.
                 (ResolveResult::Bound(ns), Event::Start(e)) if ns == NS_TABLE => {
                     match e.local_name().as_ref() {
                         b"table" => {
+                            // A nested table was intercepted by skips_subtree, so every table that
+                            // reaches here is a top-level sheet.
                             sheet = Some(Sheet {
                                 name: attr_string(&mut self.reader, &e, NS_TABLE, b"name")?
                                     .unwrap_or_default(),
@@ -329,9 +390,14 @@ impl<R: BufRead> SheetReader<R> {
                     }
                 }
                 (ResolveResult::Bound(ns), Event::Start(e)) if ns == NS_TEXT => {
+                    // Text elements matter only while a normal cell is open. A paragraph
+                    // establishes the boundary inside which ordinary character events become cell
+                    // content.
                     if let Some(c) = cell.as_mut().filter(|c| !c.covered) {
                         match e.local_name().as_ref() {
                             b"p" | b"h" => {
+                                // Nested headings/paragraphs are treated as part of the current
+                                // paragraph. Only depth zero starts a new output line.
                                 if para_depth == 0 {
                                     c.start_paragraph();
                                 }
@@ -351,6 +417,8 @@ impl<R: BufRead> SheetReader<R> {
                     }
                 }
                 (ResolveResult::Bound(ns), Event::End(e)) if ns == NS_TABLE => {
+                    // Closing structural tags transfer completed children to their parent.
+                    // Returning immediately at a sheet boundary is what makes SheetReader streaming.
                     match e.local_name().as_ref() {
                         b"table" => {
                             if let Some(s) = sheet.take() {
@@ -386,6 +454,8 @@ impl<R: BufRead> SheetReader<R> {
                     }
                 }
                 (_, Event::CData(t)) => {
+                    // CDATA changes XML escaping, not spreadsheet text semantics, so it goes
+                    // through the same ODF whitespace-collapsing path as a normal Text event.
                     if para_depth > 0
                         && let Some(c) = cell.as_mut().filter(|c| !c.covered)
                     {
@@ -402,6 +472,8 @@ impl<R: BufRead> SheetReader<R> {
                     }
                 }
                 (_, Event::Decl(e)) => apply_declared_encoding(&mut self.reader, &e)?,
+                // Styles, formulas, metadata, and every other unneeded event are ignored. This is a
+                // projection of ODF into plain cell text, not a complete ODF object model.
                 _ => {}
             }
         }
@@ -418,6 +490,8 @@ impl<R: BufRead> Iterator for SheetReader<R> {
         match self.next_sheet() {
             Ok(sheet) => sheet.map(Ok),
             Err(e) => {
+                // Iterator consumers commonly keep calling after an error. Marking the stream done
+                // ensures one underlying XML failure appears once rather than on every call.
                 self.done = true;
                 Some(Err(e))
             }
@@ -445,7 +519,8 @@ pub(crate) fn validate_flat_root<R: BufRead>(source: R) -> Result<(), Error> {
                 }
                 return Ok(());
             }
-            // Any other root element is left to the sheet parser.
+            // Any other root element is left to the sheet parser. This helper is an early document-
+            // kind check, not a second full XML validation pass.
             (_, Event::Start(_) | Event::Eof) => return Ok(()),
             // The declared encoding must be honored here too: reaching the
             // root element can require decoding past pure-ASCII content.
@@ -459,6 +534,8 @@ pub(crate) fn validate_flat_root<R: BufRead>(source: R) -> Result<(), Error> {
 /// and `;`). Only the five predefined XML entities are known; anything else
 /// would need a DTD, which OpenDocument files don't use.
 fn resolve_reference(name: &str) -> Result<char, Error> {
+    // Character references share the same Unicode-scalar validation after parsing decimal or hex.
+    // Surrogates and values above U+10FFFF therefore fail cleanly through char::from_u32.
     let char_ref = |digits: &str, radix| {
         u32::from_str_radix(digits, radix)
             .ok()
@@ -518,6 +595,8 @@ fn attr_cell_value<R>(
     reader: &mut NsReader<R>,
     e: &BytesStart<'_>,
 ) -> Result<Option<String>, quick_xml::Error> {
+    // ODF uses different attributes for different office:value-type values. The exporter wants one
+    // representation, so normalize the supported alternatives here.
     for local in [
         b"string-value".as_slice(),
         b"value",
@@ -538,6 +617,8 @@ fn attr_string<R>(
     ns: Namespace<'_>,
     local: &[u8],
 ) -> Result<Option<String>, quick_xml::Error> {
+    // Resolve each attribute namespace instead of matching its literal prefix. Unqualified
+    // attributes do not inherit the element's default namespace and therefore will not match.
     for attr in e.attributes() {
         let attr = attr?;
         let matched = {
@@ -545,6 +626,8 @@ fn attr_string<R>(
             name.as_ref() == local && matches!(resolved, ResolveResult::Bound(b) if b == ns)
         };
         if matched {
+            // normalized_value resolves entity/character references and performs XML 1.0 attribute
+            // whitespace normalization. It is appropriate for metadata, counts, and stored values.
             return Ok(Some(
                 attr.normalized_value(XmlVersion::Implicit1_0)?.into_owned(),
             ));

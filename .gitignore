@@ -1,2 +1,4 @@
+# Cargo build artifacts can be regenerated from Cargo.lock.
 /target
+# Large/generated real-world fixtures are created by scripts/generate-test-files.sh.
 /test-files

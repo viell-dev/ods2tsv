@@ -1,5 +1,10 @@
-//! Fixture-based extraction tests. Fixtures are synthetic ODS files: a ZIP
-//! with a handwritten `content.xml` (or a flat XML document).
+//! End-to-end library tests built from tiny, synthetic spreadsheets.
+//!
+//! Most fixtures are handwritten `content.xml` strings placed in an in-memory-style ZIP package;
+//! flat-document cases write the XML directly. This keeps each test focused: a reader can see the
+//! exact ODF feature being exercised beside the expected TSV bytes. The tests call the public
+//! [`extract_ods_to_tsv`] facade, so validation, parsing, expansion, naming, and file writing are
+//! all covered together.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -10,6 +15,8 @@ use ods_to_tsv::{Error, ValueMode, extract_ods_to_tsv};
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
+// Shared package-content wrapper. Individual tests insert only tables, rows, and cells between
+// HEADER and FOOTER, which removes irrelevant ODF boilerplate from the scenario.
 const HEADER: &str = concat!(
     r#"<?xml version="1.0" encoding="UTF-8"?>"#,
     r#"<office:document-content"#,
@@ -21,6 +28,8 @@ const HEADER: &str = concat!(
 const FOOTER: &str = "</office:spreadsheet></office:body></office:document-content>";
 
 fn write_ods(path: &Path, entries: &[(&str, &str)]) {
+    // Most fixtures are UTF-8 strings. Convert them to the byte-oriented helper so encoding tests
+    // can use the same ZIP construction path with non-UTF-8 bytes.
     let raw: Vec<(&str, &[u8])> = entries
         .iter()
         .map(|(name, data)| (*name, data.as_bytes()))
@@ -29,6 +38,8 @@ fn write_ods(path: &Path, entries: &[(&str, &str)]) {
 }
 
 fn write_ods_raw(path: &Path, entries: &[(&str, &[u8])]) {
+    // A real ODS has more entries, but the extractor needs only metadata plus content.xml. Deflate
+    // is supported by the production dependency configuration and keeps the fixture representative.
     let mut zip = ZipWriter::new(fs::File::create(path).unwrap());
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     for (name, data) in entries {
@@ -39,6 +50,8 @@ fn write_ods_raw(path: &Path, entries: &[(&str, &[u8])]) {
 }
 
 fn fake_ods(path: &Path, sheets: &[(&str, &[&[&str]])]) {
+    // Convenience fixture for tests that care about values rather than XML structure. The nested
+    // slice shape is sheets -> rows -> cell strings.
     let mut body = String::new();
     for (name, rows) in sheets {
         write!(body, r#"<table:table table:name="{name}">"#).unwrap();
@@ -77,6 +90,7 @@ fn read(dir: &Path, file: &str) -> String {
     fs::read_to_string(dir.join(file)).unwrap()
 }
 
+/// Proves the happy path, multiple-sheet split, timestamped directory shape, and exact TSV bytes.
 #[test]
 fn basic_extraction() {
     let tmp = tempfile::tempdir().unwrap();
@@ -99,6 +113,7 @@ fn basic_extraction() {
     assert_eq!(read(&out, "Sheet2.tsv"), "only\r\n");
 }
 
+/// Proves vertical and horizontal merge values replace their covered grid positions.
 #[test]
 fn merged_cells() {
     let tmp = tempfile::tempdir().unwrap();
@@ -135,6 +150,7 @@ fn merged_cells() {
     );
 }
 
+/// Proves paragraph joins and explicit line breaks survive and trigger TSV field quoting.
 #[test]
 fn multiline_and_spaces() {
     let tmp = tempfile::tempdir().unwrap();
@@ -170,6 +186,7 @@ fn multiline_and_spaces() {
     );
 }
 
+/// Proves predefined entities plus decimal/hex character references become Unicode text.
 #[test]
 fn entity_and_character_references() {
     let tmp = tempfile::tempdir().unwrap();
@@ -194,6 +211,7 @@ fn entity_and_character_references() {
     );
 }
 
+/// Proves compressed ODF row and column repetitions expand to physical TSV records and fields.
 #[test]
 fn repeated_rows_and_columns() {
     let tmp = tempfile::tempdir().unwrap();
@@ -220,6 +238,7 @@ fn repeated_rows_and_columns() {
     assert_eq!(read(&out, "Repeats.tsv"), "X\tX\tX\r\nY\r\nY\r\n");
 }
 
+/// Proves ordinary XML whitespace collapses while `text:s` remains an explicit extra space.
 #[test]
 fn whitespace_collapsing() {
     let tmp = tempfile::tempdir().unwrap();
@@ -246,6 +265,7 @@ fn whitespace_collapsing() {
     assert_eq!(read(&out, "Ws.tsv"), "Leading and inner\ta  b\r\n");
 }
 
+/// Proves explicit tabs and CDATA enter the same cell-text pipeline as ordinary character data.
 #[test]
 fn tab_element_and_cdata() {
     let tmp = tempfile::tempdir().unwrap();
@@ -269,6 +289,7 @@ fn tab_element_and_cdata() {
     assert_eq!(read(&out, "Tab.tsv"), "\"A\tB <raw> & data C\"\r\n");
 }
 
+/// Proves paragraph-shaped metadata cannot leak into a cell or masquerade as another sheet.
 #[test]
 fn annotations_and_nested_tables_are_not_cell_text() {
     let tmp = tempfile::tempdir().unwrap();
@@ -300,6 +321,7 @@ fn annotations_and_nested_tables_are_not_cell_text() {
     assert!(!out.join("inner.tsv").exists());
 }
 
+/// Proves typed value attributes supply text when a producer omitted formatted paragraphs.
 #[test]
 fn value_attributes_used_without_paragraphs() {
     let tmp = tempfile::tempdir().unwrap();
@@ -330,6 +352,7 @@ fn value_attributes_used_without_paragraphs() {
     );
 }
 
+/// Proves interior emptiness preserves coordinates while enormous trailing emptiness is discarded.
 #[test]
 fn empty_rows_and_cells_keep_alignment() {
     let tmp = tempfile::tempdir().unwrap();
@@ -364,6 +387,7 @@ fn empty_rows_and_cells_keep_alignment() {
     assert_eq!(read(&out, "Align.tsv"), "\r\na\t\tb\r\n\r\n\r\n\r\nc\r\n");
 }
 
+/// Proves a vertical merge fills later rows even when those rows omit covered-cell placeholders.
 #[test]
 fn merges_spill_into_rows_without_stored_cells() {
     let tmp = tempfile::tempdir().unwrap();
@@ -392,6 +416,7 @@ fn merges_spill_into_rows_without_stored_cells() {
     assert_eq!(read(&out, "Spill.tsv"), "\ttall\r\n\ttall\r\n\ttall\r\n");
 }
 
+/// Proves raw mode selects machine values and still falls back for plain string cells.
 #[test]
 fn raw_mode_prefers_stored_values() {
     let tmp = tempfile::tempdir().unwrap();
@@ -429,6 +454,7 @@ fn raw_mode_prefers_stored_values() {
     );
 }
 
+/// Proves unsafe path punctuation is removed before a sheet name becomes a file name.
 #[test]
 fn sheet_name_sanitization() {
     let tmp = tempfile::tempdir().unwrap();
@@ -439,6 +465,7 @@ fn sheet_name_sanitization() {
     assert_eq!(read(&out, "SheetWithBadChars.tsv"), "data\r\n");
 }
 
+/// Proves sanitization collisions, case-only collisions, and empty names cannot overwrite files.
 #[test]
 fn duplicate_and_unusable_sheet_names_get_distinct_files() {
     let tmp = tempfile::tempdir().unwrap();
@@ -461,6 +488,7 @@ fn duplicate_and_unusable_sheet_names_get_distinct_files() {
     assert_eq!(read(&out, "Sheet.tsv"), "nameless\r\n");
 }
 
+/// Proves a flat `.fods` document follows the same parse/export path as packaged content.xml.
 #[test]
 fn flat_xml_document_is_extracted() {
     let tmp = tempfile::tempdir().unwrap();
@@ -484,6 +512,7 @@ fn flat_xml_document_is_extracted() {
     assert_eq!(read(&out, "Flat.tsv"), "flat data\r\n");
 }
 
+/// Proves BOM-marked little-endian UTF-16 content is transcoded before event payloads are read.
 #[test]
 fn utf16_content_is_decoded() {
     let tmp = tempfile::tempdir().unwrap();
@@ -507,6 +536,7 @@ fn utf16_content_is_decoded() {
     assert_eq!(read(&out, "Wide.tsv"), "åäö ✓\r\n");
 }
 
+/// Proves an XML declaration cannot accidentally replace BOM-detected big-endian UTF-16 decoding.
 #[test]
 fn utf16_be_content_is_decoded() {
     // The declaration says "UTF-16", which resolves to little endian; it must
@@ -539,6 +569,7 @@ fn latin1(s: &str) -> Vec<u8> {
         .collect()
 }
 
+/// Proves a packaged XML declaration can select an ASCII-compatible legacy encoding.
 #[test]
 fn declared_legacy_encoding_is_honored() {
     let tmp = tempfile::tempdir().unwrap();
@@ -569,6 +600,7 @@ fn declared_legacy_encoding_is_honored() {
     assert_eq!(read(&out, "Legacy.tsv"), "café über\r\n");
 }
 
+/// Proves early flat-root validation and the later sheet parse both honor a legacy encoding.
 #[test]
 fn flat_xml_with_legacy_encoding_is_extracted() {
     let tmp = tempfile::tempdir().unwrap();
@@ -592,6 +624,7 @@ fn flat_xml_with_legacy_encoding_is_extracted() {
     assert_eq!(read(&out, "Flat.tsv"), "café über\r\n");
 }
 
+/// Proves a too-late decoder switch becomes a normal parse error instead of panic or mojibake.
 #[test]
 fn declaration_past_detection_window_is_refused() {
     // A legacy encoding can only be applied while the decoder's 64-byte
@@ -620,6 +653,7 @@ fn declaration_past_detection_window_is_refused() {
     assert!(matches!(err, Error::Xml(_)));
 }
 
+/// Proves atomic directory creation gives two immediate exports separate destinations.
 #[test]
 fn same_second_exports_get_distinct_dirs() {
     let tmp = tempfile::tempdir().unwrap();
@@ -632,6 +666,7 @@ fn same_second_exports_get_distinct_dirs() {
     assert!(first.is_dir() && second.is_dir());
 }
 
+/// Proves package metadata rejects a valid ODF document of the wrong application type.
 #[test]
 fn wrong_package_mimetype_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
@@ -650,6 +685,7 @@ fn wrong_package_mimetype_is_refused() {
     );
 }
 
+/// Proves flat-document metadata is checked before an export directory is created.
 #[test]
 fn flat_document_with_wrong_mimetype_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
@@ -669,6 +705,7 @@ fn flat_document_with_wrong_mimetype_is_refused() {
     assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
 }
 
+/// Proves a structurally readable ZIP is not enough: spreadsheet data must be present.
 #[test]
 fn package_without_content_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
@@ -682,6 +719,7 @@ fn package_without_content_is_refused() {
     assert!(matches!(err, Error::MissingContent));
 }
 
+/// Proves format sniffing rejects unrelated bytes without leaving output artifacts.
 #[test]
 fn unrecognized_file_is_refused_before_output_exists() {
     let tmp = tempfile::tempdir().unwrap();
@@ -694,6 +732,7 @@ fn unrecognized_file_is_refused_before_output_exists() {
     assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
 }
 
+/// Proves manifest encryption is reported before encrypted bytes reach the XML parser.
 #[test]
 fn encrypted_file_is_refused() {
     let tmp = tempfile::tempdir().unwrap();

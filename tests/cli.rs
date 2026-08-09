@@ -1,5 +1,8 @@
-//! Exit-code contract of the binary: 0 success, 1 other, 2 usage (clap),
-//! 3 not a usable spreadsheet, 4 corrupt/malformed, 5 encrypted.
+//! Black-box tests for the command-line process contract.
+//!
+//! These tests launch the compiled binary instead of calling Rust functions. Their primary subject
+//! is the stable exit-code mapping: 0 success, 1 other, 2 usage (clap), 3 unusable spreadsheet,
+//! 4 corrupt/malformed data, and 5 encryption. Content semantics belong in `tests/extract.rs`.
 
 use std::fs;
 use std::io::Write as _;
@@ -10,6 +13,8 @@ use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
 fn write_ods(path: &Path, entries: &[(&str, &str)]) {
+    // Build only the ZIP members required by the scenario. Production code deliberately tolerates
+    // absent optional ODF members, which makes these minimal packages valid test inputs.
     let mut zip = ZipWriter::new(fs::File::create(path).unwrap());
     let options = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
     for (name, data) in entries {
@@ -22,6 +27,8 @@ fn write_ods(path: &Path, entries: &[(&str, &str)]) {
 /// Runs the binary against `input` with a temp dir as CWD and returns the
 /// exit code.
 fn run(input: &Path) -> i32 {
+    // Isolating the current directory prevents a successful run from writing timestamped output
+    // into the source tree. The TempDir cleanup happens after the child exits.
     let cwd = tempfile::tempdir().unwrap();
     let status = Command::new(env!("CARGO_BIN_EXE_ods-to-tsv"))
         .arg(input)
@@ -32,6 +39,7 @@ fn run(input: &Path) -> i32 {
     status.code().unwrap()
 }
 
+/// A valid package completes normally.
 #[test]
 fn success_exits_zero() {
     let tmp = tempfile::tempdir().unwrap();
@@ -58,12 +66,14 @@ fn success_exits_zero() {
     assert_eq!(run(&ods), 0);
 }
 
+/// Ordinary filesystem errors retain the conventional generic-failure code.
 #[test]
 fn missing_input_exits_one() {
     let tmp = tempfile::tempdir().unwrap();
     assert_eq!(run(&tmp.path().join("nonexistent.ods")), 1);
 }
 
+/// Clap owns malformed invocation handling and reserves code 2.
 #[test]
 fn usage_error_exits_two() {
     let status = Command::new(env!("CARGO_BIN_EXE_ods-to-tsv"))
@@ -73,6 +83,7 @@ fn usage_error_exits_two() {
     assert_eq!(status.code(), Some(2));
 }
 
+/// Recognized-but-unusable document kinds share code 3.
 #[test]
 fn unusable_input_exits_three() {
     let tmp = tempfile::tempdir().unwrap();
@@ -88,6 +99,7 @@ fn unusable_input_exits_three() {
     assert_eq!(run(&text), 3);
 }
 
+/// Bytes with ZIP magic but no readable ZIP structure are classified as corruption.
 #[test]
 fn corrupt_input_exits_four() {
     let tmp = tempfile::tempdir().unwrap();
@@ -96,6 +108,7 @@ fn corrupt_input_exits_four() {
     assert_eq!(run(&broken), 4);
 }
 
+/// Manifest-declared encryption receives its own actionable code.
 #[test]
 fn encrypted_input_exits_five() {
     let tmp = tempfile::tempdir().unwrap();

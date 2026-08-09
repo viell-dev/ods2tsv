@@ -1,1 +1,2 @@
+# Treat these project names as single identifiers in documentation linting.
 doc-valid-idents = ["OpenDocument", "LibreOffice", ".."]
