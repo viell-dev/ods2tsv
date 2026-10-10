@@ -1,4 +1,5 @@
 [package]
+repository = "https://github.com/viell-dev/ods2tsv"
 name = "ods2tsv"
 version = "0.0.0"
 edition = "2024"
