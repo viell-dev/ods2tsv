@@ -1,4 +1,5 @@
 [package]
+repository = "https://github.com/viell-dev/ods2tsv"
 name = "ods-to-tsv"
 version = "0.1.0"
 # Edition 2024 enables the language defaults this source was written against; rust-version is the
